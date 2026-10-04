@@ -1,0 +1,105 @@
+name: Install test
+
+# Builds the ISO a pull request produces, installs it unattended in a KVM
+# guest, boots the installed system again, and reports how long the install
+# and both boots took. Every later change to the installer is measured
+# against these numbers in its own PR.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      # The hosted runner has far more disk than the build needs (145 GB,
+      # ~86 GB free); fail early and loudly if that ever changes.
+      - name: Check disk space
+        run: |
+          df -h /
+          avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
+          [ "$avail_gb" -ge 40 ] || { echo "::error::only ${avail_gb} GB free, the ISO build and install test need ~40 GB"; exit 1; }
+
+      - name: Prepare the runner for KVM guests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf socat imagemagick \
+            tesseract-ocr tesseract-ocr-eng mtools dosfstools jq openssh-client
+          # test/integration installs its tools through Omarchy's Arch helper;
+          # they are installed above.
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/omarchy-pkg-add >/dev/null
+          sudo chmod 0755 /usr/local/bin/omarchy-pkg-add
+          # Keep the harness's Arch paths: map Ubuntu's OVMF files onto them.
+          sudo install -d /usr/share/edk2/x64
+          sudo ln -sf "$(find /usr/share -name 'OVMF_CODE_4M.fd' -print -quit)" /usr/share/edk2/x64/OVMF_CODE.4m.fd
+          sudo ln -sf "$(find /usr/share -name 'OVMF_VARS_4M.fd' -print -quit)" /usr/share/edk2/x64/OVMF_VARS.4m.fd
+          # Ubuntu's ImageMagick 6 is `convert`; the harness calls `magick`.
+          command -v magick >/dev/null || sudo ln -sf "$(command -v convert)" /usr/local/bin/magick
+          sudo chmod 0666 /dev/kvm
+          nproc; free -h; qemu-system-x86_64 --version | head -1
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Build the ISO
+        run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
+
+      - name: Install unattended, then boot the installed system
+        env:
+          OMARCHY_INTEGRATION_DISK_CACHE: none
+        run: ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+
+      - name: Report times
+        if: always()
+        run: |
+          base=$(ls -d test-runs/*-integration 2>/dev/null | head -1)
+          [ -n "$base" ] || { echo "No test run to report" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## Install test"
+            echo
+            if [ -f "$base/omarchy-install-timing.json" ]; then
+              jq -r '"**Install:** \((.finished_at - .started_at) * 10 | round / 10) s across \(.phases | length) phases"' "$base/omarchy-install-timing.json"
+              echo
+              echo "| Phase | Seconds |"
+              echo "| --- | ---: |"
+              jq -r '.phases[] | "| \(.name) | \(.elapsed * 10 | round / 10) |"' "$base/omarchy-install-timing.json"
+              echo
+            fi
+            if [ -f "$base/first-boot-systemd-analyze.txt" ]; then
+              echo "**First boot:** $(head -1 "$base/first-boot-systemd-analyze.txt")"
+              echo
+            fi
+            boot_dir=$(ls -d "$base"/runs/*-boot 2>/dev/null | tail -1)
+            if [ -n "$boot_dir" ] && [ -f "$boot_dir/systemd-analyze.txt" ]; then
+              echo "**Everyday boot:** $(head -1 "$boot_dir/systemd-analyze.txt")"
+              echo
+              echo "System state: $(jq -r .system_state "$boot_dir/boot-timing.json" 2>/dev/null)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: install-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-runs/*/omarchy-install-timing.json
+            test-runs/*/omarchy-install.log
+            test-runs/*/first-boot-systemd-analyze.txt
+            test-runs/*/runs/**/*.png
+            test-runs/*/runs/**/*.txt
+            test-runs/*/runs/**/*.json
+            test-runs/*/runs/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
