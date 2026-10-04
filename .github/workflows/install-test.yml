@@ -34,34 +34,28 @@ jobs:
           avail_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
           [ "$avail_gb" -ge 40 ] || { echo "::error::only ${avail_gb} GB free, the ISO build and install test need ~40 GB"; exit 1; }
 
-      - name: Prepare the runner for KVM guests
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            qemu-system-x86 qemu-utils ovmf socat imagemagick \
-            tesseract-ocr tesseract-ocr-eng mtools dosfstools jq openssh-client
-          # test/integration installs its tools through Omarchy's Arch helper;
-          # they are installed above.
-          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/omarchy-pkg-add >/dev/null
-          sudo chmod 0755 /usr/local/bin/omarchy-pkg-add
-          # Keep the harness's Arch paths: map Ubuntu's OVMF files onto them.
-          sudo install -d /usr/share/edk2/x64
-          sudo ln -sf "$(find /usr/share -name 'OVMF_CODE_4M.fd' -print -quit)" /usr/share/edk2/x64/OVMF_CODE.4m.fd
-          sudo ln -sf "$(find /usr/share -name 'OVMF_VARS_4M.fd' -print -quit)" /usr/share/edk2/x64/OVMF_VARS.4m.fd
-          # Ubuntu's ImageMagick 6 is `convert`; the harness calls `magick`.
-          command -v magick >/dev/null || sudo ln -sf "$(command -v convert)" /usr/local/bin/magick
-          sudo chmod 0666 /dev/kvm
-          nproc; free -h; qemu-system-x86_64 --version | head -1
-
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Build the ISO
         run: NO_BOOT_OFFER=1 ./bin/omarchy-iso-make
 
+      # The harness runs in an Arch container: Arch's current QEMU and OVMF
+      # (QEMU 11) instead of Ubuntu 24.04's QEMU 8.2, at the paths the
+      # harness expects, the same as on an Omarchy workstation.
       - name: Install unattended, then boot the installed system
-        env:
-          OMARCHY_INTEGRATION_DISK_CACHE: none
-        run: ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+        run: |
+          sudo chmod 0666 /dev/kvm
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w \
+            -e OMARCHY_INTEGRATION_DISK_CACHE=none \
+            archlinux:latest bash -euo pipefail -c '
+              pacman -Syu --noconfirm --needed qemu-system-x86 qemu-hw-display-virtio-gpu qemu-hw-display-virtio-vga qemu-img edk2-ovmf socat \
+                imagemagick tesseract tesseract-data-eng mtools dosfstools jq openssh openssl python curl >/dev/null
+              # test/integration installs its tools through Omarchy'"'"'s helper; they are installed above.
+              printf "#!/bin/sh\nexit 0\n" >/usr/local/bin/omarchy-pkg-add
+              chmod 0755 /usr/local/bin/omarchy-pkg-add
+              qemu-system-x86_64 --version | head -1
+              ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
+            '
 
       - name: Report times
         if: always()
