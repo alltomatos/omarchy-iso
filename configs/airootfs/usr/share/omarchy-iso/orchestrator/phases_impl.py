@@ -235,8 +235,9 @@ def arch_install_system(ctx: InstallContext) -> None:
         if not pre_mounted:
             installer.mount_ordered_layout()
 
+        # The install works from the ISO's offline mirror: don't wait for
+        # time sync or the Arch keyring sync.
         installer.sanity_check(
-            offline=True,
             skip_ntp=True,
             skip_wkd=True,
         )
