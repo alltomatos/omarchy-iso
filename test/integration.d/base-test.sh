@@ -14,6 +14,9 @@ ISO="$OMARCHY_INTEGRATION_ISO"
 SSH_PORT="${OMARCHY_INTEGRATION_SSH_PORT:-2322}"
 MEMORY="${OMARCHY_INTEGRATION_MEMORY:-8192}"
 INSTALL_TIMEOUT="${OMARCHY_INTEGRATION_INSTALL_TIMEOUT:-2400}"
+# cache=none keeps the host page cache out of the guest's disk writes, so
+# install times measure the installer rather than the host (CI sets it).
+DISK_CACHE="${OMARCHY_INTEGRATION_DISK_CACHE:-}"
 NO_PREVIEW="${OMARCHY_INTEGRATION_NO_PREVIEW:-false}"
 BOOT_TIMEOUT=600
 
@@ -166,7 +169,7 @@ start_vm() {
     -m "$MEMORY" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$ACTIVE_OVMF" \
-    -drive file="$disk",format=qcow2,if=none,id=drive0 \
+    -drive file="$disk",format=qcow2,if=none,id=drive0${DISK_CACHE:+,cache=$DISK_CACHE} \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
     -device virtio-vga \
     -display none \
@@ -565,6 +568,13 @@ install_phase() {
     sleep 10
     ((waited += 10))
   done
+
+  # Keep the installer's own clock, its log and the first boot's numbers next
+  # to the base image while the system is reachable, so CI can report them
+  # without attaching the disk.
+  ssh_sudo "cat /var/log/omarchy-install-timing.json" >"$BASE_DIR/omarchy-install-timing.json" 2>/dev/null || true
+  ssh_sudo "cat /var/log/omarchy-install.log" >"$BASE_DIR/omarchy-install.log" 2>/dev/null || true
+  ssh_guest "systemd-analyze" >"$BASE_DIR/first-boot-systemd-analyze.txt" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
   stop_vm
