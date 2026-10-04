@@ -285,8 +285,12 @@ ssh_sudo() {
   ssh_guest "echo $GUEST_PASSWORD | sudo -S -p '' bash -c $(printf %q "$1")"
 }
 
+# The deadline is wall-clock: under QEMU user networking every attempt can
+# spend its whole ConnectTimeout waiting for a banner, so counting only the
+# sleeps let a "300 s" wait run for ten minutes or more, silently.
 wait_for_ssh() {
-  local timeout="$1" failure_name="${2:-failure-ssh-timeout}" waited=0
+  local timeout="$1" failure_name="${2:-failure-ssh-timeout}"
+  local started=$SECONDS next_note=30 progress_name
 
   while ! ssh_guest true 2>/dev/null; do
     if ! vm_running; then
@@ -294,14 +298,20 @@ wait_for_ssh() {
       return 1
     fi
 
-    if ((waited >= timeout)); then
+    if ((SECONDS - started >= timeout)); then
       capture_console "$failure_name"
       echo "Timed out after ${timeout}s waiting for SSH" >&2
       return 1
     fi
 
-    sleep 5
-    ((waited += 5))
+    if ((SECONDS - started >= next_note)); then
+      printf -v progress_name 'waiting-ssh-%04ds' "$((SECONDS - started))"
+      capture_console "$progress_name"
+      echo "    ... waiting for SSH ($((SECONDS - started))s)"
+      ((next_note += 30))
+    fi
+
+    sleep 2
   done
 }
 

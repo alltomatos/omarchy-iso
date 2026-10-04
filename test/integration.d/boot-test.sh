@@ -12,9 +12,15 @@ base_image_ready || { echo "No base image; run this through ./test/integration" 
 log "Booting the installed system"
 boot_started=$(date +%s%N)
 start_vm_from_base
-wait_for_ssh 300 failure-boot-ssh-timeout || exit 1
+if ! wait_for_ssh 300 failure-boot-ssh-timeout; then
+  # The console screenshot is saved; the serial log shows what the firmware,
+  # loader and kernel printed, which a screenshot of a hung boot often lacks.
+  echo "--- last lines of the serial console ---" >&2
+  tail -n 40 "$RUN_DIR/serial.log" >&2 2>/dev/null || true
+  exit 1
+fi
 boot_ms=$((($(date +%s%N) - boot_started) / 1000000))
-# Coarse: wait_for_ssh polls every 5 s. systemd-analyze below has the exact
+# Coarse: wait_for_ssh polls every 2 s. systemd-analyze below has the exact
 # firmware, loader, kernel and userspace split.
 log "SSH answered within ${boot_ms} ms of power-on"
 
