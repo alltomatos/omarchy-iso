@@ -574,7 +574,10 @@ install_phase() {
   # without attaching the disk.
   ssh_sudo "cat /var/log/omarchy-install-timing.json" >"$BASE_DIR/omarchy-install-timing.json" 2>/dev/null || true
   ssh_sudo "cat /var/log/omarchy-install.log" >"$BASE_DIR/omarchy-install.log" 2>/dev/null || true
-  ssh_guest "systemd-analyze" >"$BASE_DIR/first-boot-systemd-analyze.txt" 2>/dev/null || true
+  # SSH can answer before startup finishes, and systemd-analyze refuses until
+  # it has; wait (bounded) so the first-boot numbers are final.
+  ssh_guest "timeout 120 systemctl is-system-running --wait >/dev/null; systemd-analyze" \
+    >"$BASE_DIR/first-boot-systemd-analyze.txt" 2>/dev/null || true
 
   log "Installed system is up. Saving base image."
   stop_vm

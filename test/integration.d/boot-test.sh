@@ -19,11 +19,15 @@ boot_ms=$((($(date +%s%N) - boot_started) / 1000000))
 log "SSH answered within ${boot_ms} ms of power-on"
 
 # --wait returns once startup has finished, so systemd-analyze has final
-# numbers and a unit that fails late in boot is still counted.
-state=$(ssh_guest "timeout 120 systemctl is-system-running --wait" 2>/dev/null | tr -d '\r')
+# numbers and a unit that fails late in boot is still counted. It exits
+# non-zero for "degraded"; keep the answer so the diagnostics below are still
+# collected and the assertion reports it.
+state=$(ssh_guest "timeout 120 systemctl is-system-running --wait" 2>/dev/null | tr -d '\r' || true)
 ssh_guest "systemd-analyze" >"$RUN_DIR/systemd-analyze.txt" 2>/dev/null || true
 ssh_guest "systemd-analyze blame --no-pager | head -n 20" >"$RUN_DIR/systemd-analyze-blame.txt" 2>/dev/null || true
-ssh_guest "systemctl --failed --no-legend --plain" >"$RUN_DIR/failed-units.txt" 2>/dev/null || true
+# A query that fails must not read as "no failed units".
+ssh_guest "systemctl --failed --no-legend --plain" >"$RUN_DIR/failed-units.txt" 2>/dev/null ||
+  echo "could not query failed units over SSH" >"$RUN_DIR/failed-units.txt"
 printf '{"boot_to_ssh_ms": %d, "system_state": "%s"}\n' "$boot_ms" "$state" >"$RUN_DIR/boot-timing.json"
 
 check "systemd reports the system running (got: ${state:-nothing})" test "$state" = running
