@@ -27,7 +27,7 @@ for ISO_ARCH in aarch64 x86_64; do
 done
 
 # Exercise the shipped exclusions, not only the synthetic list above.
-eval "$(sed -n '/^OMARCHY_ARCH_DROP=(/,/^)/p' "$ROOT/builder/build-iso.sh")"
+source "$ROOT/builder/filter-packages.sh"
 input=$'dell-xps13-sidecar-amps\nbroadcom-wl\nbroadcom-wl-dkms\nlinux-aarch64'
 ISO_ARCH=aarch64
 [[ $(printf '%s' "$input" | filter_arch_packages) == linux-aarch64 ]]

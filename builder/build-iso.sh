@@ -120,35 +120,6 @@ fi
 # Build locations
 build_cache_dir=/var/cache
 
-# Packages unavailable or inapplicable on aarch64.
-OMARCHY_ARCH_DROP=(
-  # x86 platform hardware
-  amd-ucode intel-ucode
-  apple-bcm-firmware apple-t2-audio-config t2fanrd linux-t2 linux-t2-headers
-  macbook12-spi-driver-dkms macbook8-spi-pxa2xx-nodma-dkms
-  asusctl supergfxctl rog-control-center
-  dell-xps-touchpad-haptics dell-xps13-sidecar-amps tuxedo-drivers-nocompatcheck-dkms
-  intel-ipu7-camera intel-lpmd intel-media-driver libva-intel-driver
-  thermald linux-ptl linux-ptl-headers vpl-gpu-rt libvpl
-  vulkan-intel vulkan-radeon
-  nvidia-dkms nvidia-open-dkms nvidia-utils nvidia-580xx-dkms nvidia-580xx-utils
-  libva-nvidia-driver lib32-nvidia-utils lib32-nvidia-580xx-utils
-  broadcom-wl broadcom-wl-dkms yt6801-dkms qmk-hid xpadneo-dkms
-  edk2-shell memtest86+ memtest86+-efi syslinux refind
-
-  # x86 virtualization guests
-  hyperv open-vm-tools virtualbox-guest-utils-nox qemu-user-static-binfmt
-
-  # Software without an aarch64 build
-  obs-studio obsidian pinta dotnet-runtime asdcontrol
-
-  # Build artifacts not carried by Arch Linux ARM
-  yay-debug reflector
-)
-
-# Use equivalent packages available on aarch64.
-OMARCHY_ARCH_SUBST_FROM=(quickshell-git mise)
-OMARCHY_ARCH_SUBST_TO=(quickshell mise-bin)
 source /builder/filter-packages.sh
 offline_mirror_dir="$build_cache_dir/airootfs/var/cache/omarchy/mirror/offline"
 mkdir -p "$build_cache_dir" "$offline_mirror_dir"
@@ -355,15 +326,8 @@ fi
 # Collect every package we want available in the offline mirror.
 declare -a all_packages
 mapfile -t all_packages < <(
-  {
-    # Strip comments and blank lines from every package list.
-    grep -hv '^#\|^$' "$build_cache_dir/packages.$ISO_ARCH"
-    grep -hv '^#\|^$' "${base_pkg_lists[@]}"
-    grep -hv '^#\|^$' "${ARCHINSTALL_PACKAGES:-/builder/archinstall.packages}"
-    # Always include the selected Omarchy packages so the target install can
-    # find the runtime and companion packages in the offline mirror.
-    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
-  } | filter_arch_packages | sort -u
+  offline_package_roots "$build_cache_dir/packages.$ISO_ARCH" "${base_pkg_lists[@]}" \
+    "${ARCHINSTALL_PACKAGES:-/builder/archinstall.packages}"
 )
 
 # Platform packages are opt-ins, not part of the shared ARM list. In

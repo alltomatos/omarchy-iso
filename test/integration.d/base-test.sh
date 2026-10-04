@@ -403,7 +403,7 @@ EOF
             "efi_binary": "limine_x64.efi",
             "enable_fallback": true
         },
-        "storage": { "kernel": "linux" }
+        "storage": { "kernel": "linux-omarchy" }
     },
     "disk_config": {
         "config_type": "default_layout",
@@ -448,7 +448,7 @@ EOF
         ]
     },
     "hostname": "$GUEST_HOSTNAME",
-    "kernels": [ "linux" ],
+    "kernels": [ "linux-omarchy" ],
     "network_config": { "type": "iso" },
     "ntp": true,
     "parallel_downloads": 8,

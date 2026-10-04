@@ -468,7 +468,7 @@ detect_kernel() {
   if lspci -nn 2>/dev/null | grep -q "106b:180[12]"; then
     echo "linux-t2"
   else
-    echo "linux"
+    echo "linux-omarchy"
   fi
 }
 

@@ -121,6 +121,11 @@ Run `./bin/omarchy-iso-boot [release/omarchy.iso]`.
 
 Run `./test/all` for the fast, VM-free tests under `test/unit/`, which cover cidata autoinstall loading and the orchestrator's phases without needing a built ISO.
 
+Set `OMARCHY_RUNTIME_PATH=/path/to/omarchy ./test/all` to also check that the
+runtime's actual package lists supply the installer's default kernel and headers
+for both ARM media targets and x86. This checks package selection, not downloads
+or a full ISO build.
+
 To exercise installation alongside existing Windows-style partitions, run
 `./bin/omarchy-iso-test-windows-disk [release/omarchy.iso]`. It creates a
 synthetic disk in `/tmp` with an existing ESP and data partition plus ample
