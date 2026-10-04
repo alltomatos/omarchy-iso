@@ -569,11 +569,13 @@ install_phase() {
       return 1
     fi
 
+    # A line every 30 s so a slow runner never looks hung; a screenshot of
+    # the installer's dashboard every 2 min, which is enough to see progress.
     if ((waited % 120 == 0)); then
       printf -v progress_name 'success-install-progress-%04ds' "$waited"
       capture_console "$progress_name"
-      echo "    ... installing (${waited}s)"
     fi
+    ((waited % 30 == 0)) && echo "    ... installing (${waited}s)"
 
     sleep 10
     ((waited += 10))

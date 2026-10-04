@@ -57,6 +57,14 @@ jobs:
               ./test/integration release/*.iso boot --no-preview --memory 8192 --timeout 1800
             '
 
+      # The harness ran as root in its container: test-runs and what QEMU
+      # wrote there (the serial logs) belong to root until this step.
+      - name: Hand the results to the runner's user
+        if: always()
+        run: |
+          mkdir -p test-runs
+          sudo chown -R "$(id -u):$(id -g)" test-runs
+
       - name: Report times
         if: always()
         run: |
@@ -89,11 +97,7 @@ jobs:
       # it needs the PR number, which a workflow_run event omits for forks.
       - name: Record the pull request
         if: always() && github.event_name == 'pull_request'
-        run: |
-          # The harness ran as root in its container and created test-runs.
-          mkdir -p test-runs
-          sudo chown "$(id -u):$(id -g)" test-runs
-          echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
+        run: echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
 
       - name: Upload test artifacts
         if: always()
