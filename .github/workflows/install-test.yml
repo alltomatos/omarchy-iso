@@ -7,6 +7,9 @@ name: Install test
 
 on:
   pull_request:
+  # Each merge records quattro's numbers, which PR comments compare against.
+  push:
+    branches: [quattro]
   workflow_dispatch:
 
 permissions:
@@ -88,12 +91,19 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The comment workflow runs from quattro and reads only this artifact;
+      # it needs the PR number, which a workflow_run event omits for forks.
+      - name: Record the pull request
+        if: always() && github.event_name == 'pull_request'
+        run: mkdir -p test-runs && echo "${{ github.event.pull_request.number }}" > test-runs/pr-number
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: install-test-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            test-runs/pr-number
             test-runs/*/omarchy-install-timing.json
             test-runs/*/omarchy-install.log
             test-runs/*/first-boot-systemd-analyze.txt
