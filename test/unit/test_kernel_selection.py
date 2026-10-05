@@ -92,7 +92,6 @@ class KernelSelectionTest(unittest.TestCase):
                 with self.subTest(kernels=kernels, fail_headers=fail_headers), ExitStack() as stack:
                     events = []
                     installer = mock.MagicMock()
-                    installer.minimal_installation.side_effect = lambda **kwargs: events.append("base")
 
                     def install_packages(packages):
                         events.append(packages)
@@ -115,8 +114,13 @@ class KernelSelectionTest(unittest.TestCase):
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))
                     stack.enter_context(mock.patch.object(phases_impl, "configure_keyboard", return_value=True))
-                    stack.enter_context(mock.patch.object(phases_impl, "_install_early_packages", side_effect=lambda inst: events.append("early")))
-                    stack.enter_context(mock.patch.object(phases_impl, "_runtime_package_list", return_value=["omarchy"]))
+                    # The root image carries the base system and the Omarchy
+                    # packages; archinstall adds this machine's delta on top.
+                    stack.enter_context(mock.patch.object(phases_impl, "_install_root_image"))
+                    stack.enter_context(mock.patch.object(
+                        phases_impl.arch, "install_base_delta", create=True,
+                        side_effect=lambda *args, **kwargs: events.append("base"),
+                    ))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "is_pre_mount", return_value=True, create=True))
                     stack.enter_context(mock.patch.object(phases_impl.arch, "root_user", return_value=None, create=True))
                     opened = stack.enter_context(mock.patch.object(phases_impl.arch, "open_installer", create=True))
@@ -126,10 +130,7 @@ class KernelSelectionTest(unittest.TestCase):
                             phases_impl.arch_install_system(ctx)
                     else:
                         phases_impl.arch_install_system(ctx)
-                    expected = ["base", [f"{kernel}-headers" for kernel in kernels]]
-                    if not fail_headers:
-                        expected += ["early", ["omarchy"]]
-                    self.assertEqual(events, expected)
+                    self.assertEqual(events, ["base", [f"{kernel}-headers" for kernel in kernels]])
                     unmask.assert_called_once_with(ctx)
                     unmount.assert_called_once_with(ctx)
 
