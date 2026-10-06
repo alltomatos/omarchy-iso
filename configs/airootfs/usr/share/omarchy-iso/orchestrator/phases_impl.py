@@ -1951,8 +1951,9 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not (ctx.target / "usr" / "bin" / "limine-update").exists():
         raise RuntimeError("/usr/bin/limine-update missing in target")
 
-    # Skip the linux-t2 mkinitcpio work on non-Apple hardware.
-    if not _is_apple_t2_hardware():
+    # Skip the linux-t2 mkinitcpio work on machines that did not select it.
+    selected_kernels = ctx.user_configuration.get("kernels") or []
+    if "linux-t2" not in selected_kernels and not _is_apple_t2_hardware():
         for preset in ("linux-t2.preset",):
             path = ctx.target / "etc" / "mkinitcpio.d" / preset
             if path.exists():
@@ -2036,6 +2037,23 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                  "--no-mutex", "--no-hooks"],
                 check=True,
             )
+        # The pre-built UKI covers one kernel, the one the image was built
+        # with. A machine that selected another (linux-t2 on a T2 Mac; the base
+        # delta installed it) has the package on disk and every T2 setting
+        # written, but no UKI or boot entry for it: it would boot the image's
+        # kernel, which has no driver for the T2's keyboard. Build those the
+        # normal way; the selected kernel is put first, as omarchy's own
+        # kernel migration does.
+        extra_kernels = [k for k in _installed_kernels(ctx) if k != prebuilt_kernel]
+        selected = next((k for k in selected_kernels if k in extra_kernels), None)
+        if selected:
+            text = default_limine.read_text()
+            text = "\n".join(l for l in text.splitlines() if not re.match(r"\s*BOOT_ORDER\s*=", l))
+            default_limine.write_text(f'{text}\nBOOT_ORDER="{selected}, {selected}-*, *, *fallback, Snapshots"\n')
+            info(f"› {selected} boots first; the pre-built UKI is for {prebuilt_kernel}")
+        for kernel in extra_kernels:
+            with _time_step(f"LIMINE.limine-mkinitcpio {kernel} (not covered by the pre-built UKI)"):
+                subprocess.run(["arch-chroot", str(ctx.target), "limine-mkinitcpio", kernel], check=True)
     else:
         with _time_step("LIMINE.limine-mkinitcpio (fallback — no pre-built UKI)"):
             subprocess.run(
