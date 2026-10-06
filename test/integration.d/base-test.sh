@@ -339,9 +339,12 @@ wait_for_ssh() {
 
     # Every boot of an encrypted install stops in the initramfs asking for the
     # passphrase, scenario overlays included.
+    # The busybox encrypt hook asks "A password is required to access the root
+    # volume"; systemd-cryptsetup (the pre-built UKI's initramfs) asks "Please
+    # enter passphrase for disk root". Same alternation as the install wait.
     if [[ ${ENCRYPT:-false} == true ]] && ((SECONDS - started >= next_unlock)); then
       ((next_unlock += 15))
-      if ocr_screen | grep -qi "password is required"; then
+      if ocr_screen | grep -qiE "password is required|enter passphrase|unlocking"; then
         type_text "$GUEST_PASSWORD"
         press ret
       fi

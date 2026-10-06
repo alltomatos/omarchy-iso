@@ -238,12 +238,30 @@ default_uki="/var/lib/omarchy-iso/prebuilt-uki.efi"
 default_options="-S autodetect"
 PRESET
 
-  echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, no autodetect)"
+  # The pre-built UKI's own config. Naming a config with -c makes mkinitcpio
+  # skip /etc/mkinitcpio.conf.d, which is where omarchy_hooks.conf sets the
+  # busybox hook list (udev ... encrypt): that list needs cryptdevice= and
+  # root= on the cmdline, which a build-time UKI cannot know. The systemd
+  # hook set needs neither: systemd-gpt-auto-generator finds the root
+  # partition by its GPT type, and if it is LUKS, sd-encrypt unlocks it at a
+  # passphrase prompt (plymouth draws it). One UKI for plain and encrypted
+  # installs; the first kernel update rebuilds it from the drop-ins as usual.
+  # Persistent dm-crypt flags (discards, no read workqueue) come from the LUKS2
+  # header, written by the installer at open time, not from the cmdline.
+  cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
+MODULES=(thunderbolt)
+BINARIES=()
+FILES=()
+HOOKS=(base systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)
+COMPRESSION="zstd"
+CONF
+
+  echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, systemd and sd-encrypt hooks, no autodetect)"
   # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
   # hooks, which fail without a mounted ESP.
   if arch-chroot "$root" mkinitcpio \
        -k "/usr/lib/modules/${image_kver}/vmlinuz" \
-       -c /etc/mkinitcpio.conf \
+       -c /etc/mkinitcpio-prebuilt-uki.conf \
        -U /var/lib/omarchy-iso/prebuilt-uki.efi \
        -S autodetect 2>&1 | tail -25 ; then
     if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
@@ -256,6 +274,8 @@ PRESET
     # Clean up any partial output that would upset btrfs shrink downstream.
     rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
   fi
+  # Only this build uses the config; the installed system has no use for it.
+  rm -f "$root/etc/mkinitcpio-prebuilt-uki.conf"
 fi
 
 # Emit the filesystem image itself, not a send stream. The installer writes
