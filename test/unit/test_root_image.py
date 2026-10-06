@@ -4,7 +4,7 @@ Covers the pre-flight checks prepare_install_target runs before the disk is
 touched (image present and verified by the boot-time units, a disk layout the
 image can land on), the verify progress the dashboard shows, what the written
 image owes the later phases, and the target keyring unit. The write and the
-reshape are in test_install_root_image_dd.py.
+reshape are in test_place_root_image.py.
 """
 
 import os
@@ -78,7 +78,7 @@ class VerifyRootImageLayoutTest(unittest.TestCase):
             phases_impl.verify_root_image_layout({})
 
 
-class VerifyRootImageStreamTest(unittest.TestCase):
+class VerifyRootImageTest(unittest.TestCase):
     """verify_install_medium delegates to the shared shell helper
     (omarchy-wait-root-image-verify): it passes when the helper exits 0 and
     fails the install with the helper's message when it does not. The wait,
@@ -153,7 +153,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
             fd = os.open(stream, os.O_RDONLY)
             try:
                 os.read(fd, 1024)
-                with mock.patch.object(phases_impl, "ROOT_IMAGE_RAW_ZST", stream), \
+                with mock.patch.object(phases_impl, "ROOT_IMAGE", stream), \
                      mock.patch.object(phases_impl, "_verify_unit_property",
                                        side_effect=unit_property), \
                      mock.patch.object(phases_impl, "_write_phase_progress",
@@ -194,7 +194,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
             try:
                 os.read(package, 500)
                 os.read(image, 1024)
-                with mock.patch.object(phases_impl, "ROOT_IMAGE_RAW_ZST", stream), \
+                with mock.patch.object(phases_impl, "ROOT_IMAGE", stream), \
                      mock.patch.object(phases_impl, "MIRROR_SUMS", sums), \
                      mock.patch.object(phases_impl, "OFFLINE_MIRROR", mirror), \
                      mock.patch.object(phases_impl, "_verify_unit_property",
@@ -209,7 +209,7 @@ class PublishVerifyProgressTest(unittest.TestCase):
             self.assertEqual(fractions, [1500 / 6096, 3024 / 6096])
 
     def test_missing_image_is_a_no_op(self):
-        with mock.patch.object(phases_impl, "ROOT_IMAGE_RAW_ZST",
+        with mock.patch.object(phases_impl, "ROOT_IMAGE",
                                Path("/nonexistent/omarchy-root.img.zst")), \
              mock.patch.object(phases_impl, "_verify_unit_property") as show:
             phases_impl._publish_verify_progress(ctx=None)
@@ -229,7 +229,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def test_full_disk_checks_json_layout_then_stream(self):
+    def test_full_disk_checks_json_layout_then_image(self):
         ctx = types.SimpleNamespace(
             is_protected=False, target=Path("/mnt"),
             user_configuration={"disk_config": btrfs_root_layout()},
@@ -237,7 +237,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
         phases_impl.prepare_install_target(ctx)
         self.assertEqual(self.calls, ["verify_root_image_layout", "verify_install_medium"])
 
-    def test_protected_checks_real_mounts_then_stream(self):
+    def test_protected_checks_real_mounts_then_image(self):
         ctx = types.SimpleNamespace(
             is_protected=True, target=Path("/mnt"),
             user_configuration={"disk_config": {"config_type": "pre_mounted_config"}},
@@ -252,7 +252,7 @@ class PrepareInstallTargetTest(unittest.TestCase):
 class FinishRootImageTest(unittest.TestCase):
     """What the written image owes the rest of the install: the packages the
     later phases assume, and a machine-id. (The write and the reshape are in
-    test_install_root_image_dd.py.)"""
+    test_place_root_image.py.)"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

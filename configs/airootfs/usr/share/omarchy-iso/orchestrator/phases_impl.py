@@ -164,15 +164,10 @@ def _time_step(label: str):
 # table and written onto the target partition in place of pacstrapping it.
 # build-iso.sh ships it as a plain file on the ISO, read straight off the boot
 # medium, with its sha256 next to it. Its one subvolume becomes @.
-ROOT_IMAGE_RAW_ZST = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
+ROOT_IMAGE = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
 ROOT_IMAGE_SUBVOLUME = "omarchy-root"
-# Writes ROOT_IMAGE_RAW_ZST in parallel; compiled and installed by build-iso.sh.
+# Writes ROOT_IMAGE in parallel; compiled and installed by build-iso.sh.
 IMAGE_WRITE = Path("/usr/local/bin/omarchy-image-write")
-
-
-def _root_image_verified() -> Path:
-    """The artifact omarchy-root-image-verify.service hashes."""
-    return ROOT_IMAGE_RAW_ZST
 
 
 # The live ISO starts omarchy-root-image-verify.service at boot: `sha256sum -c`
@@ -193,7 +188,7 @@ BOOT_MEDIUM_MOUNT = Path("/run/archiso/bootmnt")
 
 
 def _root_image() -> Path:
-    if not ROOT_IMAGE_RAW_ZST.is_file():
+    if not ROOT_IMAGE.is_file():
         # The archiso hook unmounts the boot medium after copying the airootfs
         # to RAM (copytoram). The boot entries pin copytoram=n, so this only
         # happens when someone edits the kernel command line.
@@ -202,8 +197,8 @@ def _root_image() -> Path:
                 f"boot medium is not mounted at {BOOT_MEDIUM_MOUNT}: the live system was "
                 "copied to RAM (copytoram) and the medium released; boot with copytoram=n"
             )
-        raise RuntimeError(f"root image missing: {ROOT_IMAGE_RAW_ZST}")
-    return ROOT_IMAGE_RAW_ZST
+        raise RuntimeError(f"root image missing: {ROOT_IMAGE}")
+    return ROOT_IMAGE
 
 # Packages the image must carry for the rest of the install to work: Limine
 # setup reads the settings package's limine config, useradd copies the skel the
@@ -352,7 +347,7 @@ def _publish_verify_progress(ctx: InstallContext) -> None:
     verdict, and any hiccup here (unit already done, hasher between opens,
     /proc gone) just skips a sample."""
     try:
-        image = _root_image_verified().stat().st_size
+        image = ROOT_IMAGE.stat().st_size
     except OSError:
         return
     mirror = _mirror_files()
@@ -423,7 +418,7 @@ def _hasher_positions(unit: str = ROOT_IMAGE_VERIFY_UNIT) -> dict[Path, int]:
 
 def _hasher_read_pos() -> int | None:
     """How far the root image hasher has read the image."""
-    return _hasher_positions().get(_root_image_verified())
+    return _hasher_positions().get(ROOT_IMAGE)
 
 
 def _mirror_files() -> list[tuple[Path, int]]:
@@ -762,7 +757,7 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
         _check_dd_full_blocks(dd_stderr)
 
 
-def _install_root_image_dd(ctx: InstallContext) -> None:
+def _place_root_image(ctx: InstallContext) -> None:
     """Write the pre-built btrfs image onto the target root device, give it a
     fresh fsid, grow it to the partition, and reshape it into the @ layout:
     the same ~940 packages a pacstrap would install, at the speed of the
@@ -849,7 +844,7 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
 
 
 def _install_root_image(ctx: InstallContext) -> None:
-    _install_root_image_dd(ctx)
+    _place_root_image(ctx)
     _finish_root_image(ctx)
 
 

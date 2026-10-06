@@ -420,7 +420,6 @@ sync
 umount "$mnt"
 losetup -d "$loop"
 truncate -s "${shrink_mb}M" "$backing"
-zst_output="$output"
 
 # Compress the image for the ISO. zstd collapses the unused space; the data
 # is already compressed inside btrfs and shrinks little. Measured: 6.3 GB
@@ -431,5 +430,5 @@ zst_output="$output"
 # 0.9 s instead of 2.5 s through zstdcat | dd on a 990 PRO. Framing costs
 # 1.3% (55 MB). It is still one valid .zst; zstd -d reads it unchanged.
 echo "Packing the root image as 256 KiB zstd frames"
-omarchy-image-write pack "$backing" "$zst_output"
-echo "Root image raw.zst: $(du -h "$zst_output" | cut -f1) at $zst_output (from ${shrink_mb}M apparent input)"
+omarchy-image-write pack "$backing" "$output"
+echo "Root image: $(du -h "$output" | cut -f1) at $output (from ${shrink_mb}M apparent input)"
