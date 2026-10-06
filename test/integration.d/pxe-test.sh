@@ -38,6 +38,7 @@ pxe_cleanup() {
   local status=$?
   [[ -n $NBD_PID ]] && kill "$NBD_PID" 2>/dev/null || true
   cleanup
+  rm -rf "$TFTP_ROOT"
   return $status
 }
 trap pxe_cleanup EXIT
