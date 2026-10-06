@@ -98,6 +98,13 @@ finish() {
     [[ ${OMARCHY_INTEGRATION_KEEP_DISKS:-0} == 1 ]] || rm -f "$RUN_DIR"/*.qcow2
   else
     log "$SCENARIO FAILED: $FAILURES assertion(s). Artifacts: $RUN_DIR"
+    # A failed scenario keeps its disks for a look afterwards. A CI host
+    # never takes that look (it uploads logs and screenshots, not disks)
+    # and a scenario whose failures are known and allowed, such as
+    # factory-reset's shared-ESP ones, would otherwise park a full
+    # re-install's overlay on the run directory for every scenario after
+    # it: with corrupt-image's ISO copy that fills an 18 GB tmpfs.
+    [[ ${OMARCHY_INTEGRATION_DISCARD_DISKS:-0} == 1 ]] && rm -f "$RUN_DIR"/*.qcow2
     exit 1
   fi
 }

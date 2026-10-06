@@ -20,7 +20,11 @@
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-CORRUPT_ISO="$BASE_DIR/corrupt.iso"
+# The 7 GB copy can live somewhere other than the run directory: a CI host
+# that keeps run directories on a tmpfs sized for base images and overlays
+# points OMARCHY_INTEGRATION_SCRATCH_DIR at its disk (the copy is read once
+# at boot and once by the hasher, so a ramdisk buys it nothing).
+CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
 # The root image's file name is resolved from the ISO, not assumed
 # (omarchy-root.img.zst for the block copy, omarchy-root.btrfs.zst for a
 # btrfs receive stream): with the wrong name the scenario silently tests
@@ -49,6 +53,7 @@ corrupt_iso() {
   local lba size start off orig flipped
 
   log "Copying the ISO and corrupting one byte inside the root image stream"
+  mkdir -p "$(dirname "$CORRUPT_ISO")"
   rm -f "$CORRUPT_ISO"
   cp --reflink=auto "$ISO" "$CORRUPT_ISO"
 
