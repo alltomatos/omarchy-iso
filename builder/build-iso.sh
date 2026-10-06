@@ -321,12 +321,14 @@ printf '%s\n' "${required_package_files[@]}" |
 # root image from an older package than the mirror beside it advertises.
 rebuild_offline_repo_db
 
-# Packages that differ per machine and therefore stay out of the root image:
-# the installer pacstraps them on the target after unpacking the image, and
-# omarchy-apply-system installs more from omarchy-other.packages as the
-# hardware dictates. Everything else the target gets is in the image.
-hardware_packages=(linux linux-t2 amd-ucode intel-ucode sof-firmware alsa-firmware tailscale)
-
+# The root image is universal: it also holds the packages the installer used
+# to add on every target after unpacking the image (both CPU microcodes, the
+# audio firmware, Tailscale), so that package step finds nothing left to
+# install, which saves 6 to 8 s per install. They coexist safely: the kernel
+# loads only the microcode that matches the CPU, the audio firmware packages
+# do not conflict, and Tailscale is idle without an auth key.
+# omarchy-apply-system still installs more from omarchy-other.packages as the
+# hardware dictates.
 mapfile -t image_packages < <(
   {
     grep -hv '^#\|^$' /builder/archinstall.packages
@@ -334,7 +336,7 @@ mapfile -t image_packages < <(
     # The shipped copy, which is what the install reads too.
     grep -hv '^#\|^$' "$build_cache_dir/airootfs/usr/share/omarchy-iso/omarchy-base.packages"
     printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
-  } | sort -u | grep -Fxv "${hardware_packages[@]/#/-e}"
+  } | sort -u
 )
 
 # pacstrap resolves the image against the offline repo and, with CacheDir on
@@ -358,7 +360,7 @@ sed "/^\[options\]/a CacheDir = /var/cache/omarchy/mirror/offline/" \
 iso_subdir="$(sed -n 's/^install_dir="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")/$(sed -n 's/^arch="\(.*\)"$/\1/p' "$build_cache_dir/profiledef.sh")"
 [[ $iso_subdir == */x86_64 ]] || { echo "ERROR: could not read install_dir/arch from profiledef.sh: '$iso_subdir'" >&2; exit 1; }
 root_image_dir="$build_cache_dir/work/iso/$iso_subdir"
-root_image_stream="$root_image_dir/omarchy-root.btrfs.zst"
+root_image_stream="$root_image_dir/omarchy-root.img.zst"
 mkdir -p "$root_image_dir"
 # Builds before the move left the stream (and, briefly, its checksum) in the
 # persistent build cache, where they would ship inside the squashfs alongside

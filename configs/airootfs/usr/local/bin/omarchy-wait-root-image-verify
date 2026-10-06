@@ -20,7 +20,7 @@ set -uo pipefail
 
 UNIT=omarchy-root-image-verify.service
 BOOT_MEDIUM_MOUNT=/run/archiso/bootmnt
-STREAM="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.btrfs.zst"
+STREAM="$BOOT_MEDIUM_MOUNT/arch/x86_64/omarchy-root.img.zst"
 CHECKSUM="$STREAM.sha256"
 
 fail() { echo "$1" >&2; exit 1; }

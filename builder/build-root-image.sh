@@ -202,8 +202,98 @@ installed=$(find "$root/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -type d | 
 echo "Root image holds $installed packages"
 
 sync
-btrfs property set -ts "$root" ro true
-rm -f "$output"
-mkdir -p "$(dirname "$output")"
-btrfs send -q --compressed-data "$root" | "${STREAM_COMPRESS[@]}" -o "$output"
-echo "Root image stream: $(du -h "$output" | cut -f1) at $output"
+
+# Build the UKI here, once, so the installer copies it to the ESP and skips
+# the ~4 s of mkinitcpio, ukify and limine-entry-tool on the target.
+#
+# Its cmdline is generic, with no root= and no resume=: the initramfs has the
+# systemd hook, so systemd-gpt-auto-generator finds the root by its partition
+# type GUID.
+#
+# /boot/EFI/Linux inside the image is shadowed by the ESP mount at install
+# time, so the UKI is kept in /var/lib/omarchy-iso, where nothing mounts over
+# it.
+mkdir -p "$root/etc/kernel" "$root/etc/mkinitcpio.d" "$root/var/lib/omarchy-iso"
+cat >"$root/etc/kernel/cmdline" <<'CMDLINE'
+zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0
+CMDLINE
+
+# The preset names the kernel version explicitly: mkinitcpio treats a glob in
+# ALL_kver as a literal path. It sets no ALL_microcode, which is deprecated;
+# the microcode hook in mkinitcpio.conf adds the microcode.
+image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
+if [[ -z $image_kver ]]; then
+  echo "WARNING: no kernel version found under /usr/lib/modules/; skipping the UKI pre-build"
+else
+  # The kernel package this image carries: linux-omarchy since upstream made it
+  # the default, stock linux before. The installer names the UKI
+  # and its Limine entry after it.
+  image_kernel=$(<"$root/usr/lib/modules/${image_kver}/pkgbase")
+  echo "$image_kernel" >"$root/var/lib/omarchy-iso/prebuilt-uki.kernel"
+  cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/usr/lib/modules/${image_kver}/vmlinuz"
+PRESETS=('default')
+default_uki="/var/lib/omarchy-iso/prebuilt-uki.efi"
+default_options="-S autodetect"
+PRESET
+
+  echo "Pre-building the UKI in the image (kver=$image_kver, generic cmdline, no autodetect)"
+  # mkinitcpio is called directly: the preset flow (-P) runs Limine's install
+  # hooks, which fail without a mounted ESP.
+  if arch-chroot "$root" mkinitcpio \
+       -k "/usr/lib/modules/${image_kver}/vmlinuz" \
+       -c /etc/mkinitcpio.conf \
+       -U /var/lib/omarchy-iso/prebuilt-uki.efi \
+       -S autodetect 2>&1 | tail -25 ; then
+    if [[ -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi" ]]; then
+      echo "Pre-built UKI: $(du -h "$root/var/lib/omarchy-iso/prebuilt-uki.efi" | cut -f1)"
+    else
+      echo "WARNING: mkinitcpio ran but left no UKI; the installer will build one"
+    fi
+  else
+    echo "WARNING: mkinitcpio failed; the installer will build the UKI"
+    # Clean up any partial output that would upset btrfs shrink downstream.
+    rm -f "$root/var/lib/omarchy-iso/prebuilt-uki.efi"
+  fi
+fi
+
+# Emit the filesystem image itself, not a send stream. The installer writes
+# it straight onto the target partition, gives the filesystem a new fsid and
+# grows it to fill the partition: no btrfs receive, and about 14 s becomes
+# about 3 s on a Gen4 NVMe.
+#
+# Shrink the filesystem and truncate the backing file first: xorriso stores a
+# file at its apparent size, so a sparse 24 GiB backing file would overflow
+# the medium even with 5 GiB in use.
+sync
+# Size it from the bytes actually in use, plus slack. `btrfs inspect-internal
+# min-dev-size` is unreliable (Debian bug #921038: off by gigabytes in both
+# directions). Too large is harmless, because the installer grows the
+# filesystem anyway; too small corrupts it.
+used_bytes=$(btrfs filesystem usage --raw "$mnt" | awk '/^\s+Used:/ {print $2; exit}')
+# 2 GiB of slack: shrinking relocates block groups and fails with ENOSPC when
+# the new size is too tight.
+shrink_mb=$(( (used_bytes / 1048576) + 2048 ))
+echo "Shrinking image btrfs to ${shrink_mb}M (used $((used_bytes / 1048576))M + 2048M slack)"
+# If the shrink fails, ship the image at its current size.
+if ! btrfs filesystem resize "${shrink_mb}M" "$mnt"; then
+  echo "WARNING: btrfs shrink to ${shrink_mb}M failed; keeping the current size"
+  shrink_mb=$(( ${OMARCHY_IMAGE_SIZE:-24G} ))
+  shrink_mb=$(( ${shrink_mb%G} * 1024 ))
+fi
+sync
+umount "$mnt"
+losetup -d "$loop"
+truncate -s "${shrink_mb}M" "$backing"
+# build-iso.sh passes the final file name, omarchy-root.img.zst.
+zst_output="$output"
+[[ $zst_output == *.zst ]] || zst_output="${zst_output}.zst"
+
+# Compress the image for the ISO. zstd collapses the unused space; the data
+# is already compressed inside btrfs and shrinks little. Measured: 6.3 GB
+# becomes 3.8 GB at zstd -3, for about 1 s more at install time, because the
+# decompression runs alongside the write.
+echo "Compressing the root image with zstd -3"
+zstd -3 -q --stdout "$backing" >"$zst_output"
+echo "Root image raw.zst: $(du -h "$zst_output" | cut -f1) at $zst_output (from ${shrink_mb}M apparent input)"

@@ -7,8 +7,8 @@ Description=Verify the Omarchy root image on the install medium
 # This is the only verifier: the orchestrator's prepare_install_target phase
 # collects the verdict, waits for the unit if it is still running, and fails
 # the install if it could not run.
-ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst
-ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst.sha256
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst
+ConditionPathExists=/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst.sha256
 
 [Service]
 Type=oneshot
@@ -20,7 +20,7 @@ RemainAfterExit=yes
 # forever. On timeout Result=timeout tells the wait helper to report a slow
 # medium rather than a corrupt one.
 WorkingDirectory=/run/archiso/bootmnt/arch/x86_64
-ExecStart=/usr/bin/sha256sum --check --strict omarchy-root.btrfs.zst.sha256
+ExecStart=/usr/bin/sha256sum --check --strict omarchy-root.img.zst.sha256
 # Background work: never compete with the console or anything interactive.
 Nice=19
 IOSchedulingClass=idle
