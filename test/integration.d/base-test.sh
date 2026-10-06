@@ -246,7 +246,24 @@ start_vm_from_base() {
 
 # ------------------------------------------------------------ console driver
 
+# Read the guest's screen. A blank read is retried once after waking the
+# console: the kernel blanks a VT after ten idle minutes, and a scenario that
+# waits that long (corrupt-image and slow-medium wait for an installer to
+# stop, which on a busy CI runner takes minutes) then screendumps black and
+# every assertion that greps the dashboard fails although the text is there.
+# Shift is the wake-up: it unblanks the VT and no dashboard reads it.
 ocr_screen() {
+  local text
+  text=$(ocr_screen_once)
+  if [[ -z ${text//[[:space:]]/} ]]; then
+    press shift
+    sleep 1
+    text=$(ocr_screen_once)
+  fi
+  printf '%s' "$text"
+}
+
+ocr_screen_once() {
   local shot="$RUN_DIR/.screen.ppm" prepped="$RUN_DIR/.screen.png"
 
   screendump "$shot"
