@@ -60,9 +60,10 @@ run_helper() { # loadstate, active_seq, start_rc, [result]  ->  sets RC and OUT
   local mirror_pid=0
   if [[ -n ${WITH_MIRROR_HASHER:-} ]]; then
     mirror_pid=4343
-    mkdir -p "$box/mirror" "$box/proc/4343/fd"
+    mkdir -p "$box/mirror" "$box/proc/4343/fd" "$box/proc/4343/fdinfo"
     : >"$box/mirror/linux-t2.pkg.tar.zst"
     ln -s "$box/mirror/linux-t2.pkg.tar.zst" "$box/proc/4343/fd/5"
+    printf 'pos:\t100\nflags:\t0100000\n' >"$box/proc/4343/fdinfo/5"
   fi
 
   cat >"$box/bin/findmnt" <<EOF
@@ -144,7 +145,8 @@ EOF
   [[ -n ${WITH_HASHER_PROC:-}${WITH_MIRROR_HASHER:-} ]] && progress_env=(OMARCHY_VERIFY_PROGRESS="$box/progress")
 
   set +e
-  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 env "${progress_env[@]}" bash "$shim" 2>&1)
+  OUT=$(PATH="$box/bin:$PATH" OMARCHY_VERIFY_RETRY_SECONDS=0 OMARCHY_VERIFY_STALL_SECONDS="${STALL:-60}" \
+    env "${progress_env[@]}" timeout 120 bash "$shim" 2>&1)
   RC=$?
   set -e
   PROGRESS_OUT=$(cat "$box/progress" 2>/dev/null || true)
@@ -252,6 +254,12 @@ check "mirror hash with a progress line passes" 0 "$RC" "" "$OUT"
 [[ $PROGRESS_OUT == *"packages:  50%"* && $PROGRESS_OUT == *"packages: 100%"* ]] &&
   echo "ok: the packages progress shows 50% then 100%" ||
   { echo "FAIL: packages progress wrong: $(printf '%q' "$PROGRESS_OUT")"; fails=1; }
+
+# A hasher whose offset stops moving while the install waits on it is a medium
+# that stopped answering: say so, rather than wait out the size-based timeout.
+# (The fixture's hasher sits at byte 512 for good.)
+STALL=1 WITH_HASHER_PROC=1 run_helper loaded "activating" 0
+check "a stalled hash is reported" 1 "$RC" "install medium stopped responding" "$OUT"
 
 # The mirror's verdict comes first: a corrupt package fails the gate before
 # the image's verdict is waited for (the image unit here never finishes).

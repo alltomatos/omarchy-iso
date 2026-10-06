@@ -47,38 +47,41 @@ unit_prop() {
   printf '%s\n' "$value"
 }
 
-# How far the hasher has read, as an integer percent: the unit's MainPID is
-# sha256sum while it runs, and its fdinfo pos on the stream is the byte
-# offset (the same source the orchestrator mirrors into the dashboard).
-# Fails silently between opens or once the unit is done; callers just skip
-# that sample.
-hash_pct() {
-  local pid fd pos size
+# Where the unit's hasher is: the file it has open on the medium (the image,
+# or a mirror package) and its byte offset in it, from the fdinfo of the
+# unit's MainPID (sha256sum while it runs; the same source the orchestrator
+# mirrors into the dashboard). Fails silently between opens or once the unit
+# is done; callers just skip that sample.
+hash_where() {
+  local pid fd path pos
   pid=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
-  [[ $UNIT == "$MIRROR_UNIT" ]] && { mirror_pct "$pid"; return; }
-  size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
-  ((size > 0)) || return 1
   for fd in /proc/"$pid"/fd/*; do
-    [[ $(readlink "$fd" 2>/dev/null) == "$STREAM" ]] || continue
+    path=$(readlink "$fd" 2>/dev/null) || continue
+    [[ $path == "$STREAM" || $path == "$MIRROR_DIR"/* ]] || continue
     pos=$(awk '/^pos:/ {print $2; exit}' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null)
-    [[ -n $pos ]] && { echo $((pos * 100 / size)); return 0; }
+    [[ -n $pos ]] && { printf '%s\t%s\n' "$path" "$pos"; return 0; }
   done
   return 1
 }
 
-# The mirror hasher reads one package after another in the sums file's order:
-# its percent is the place of the package it has open in that list.
-mirror_pct() {
-  local fd path line total
+# How far the hasher is, as an integer percent: of the image's bytes, or for
+# the mirror (one package after another, in the sums file's order) the place
+# of the package it has open in that list.
+hash_pct() {
+  local where path pos size line total
+  where=$(hash_where) || return 1
+  path=${where%$'\t'*} pos=${where##*$'\t'}
+  if [[ $path == "$STREAM" ]]; then
+    size=$(stat -c %s "$STREAM" 2>/dev/null) || return 1
+    ((size > 0)) || return 1
+    echo $((pos * 100 / size))
+    return 0
+  fi
   total=$(grep -c . "$MIRROR_SUMS" 2>/dev/null) || return 1
-  for fd in /proc/"$1"/fd/*; do
-    path=$(readlink "$fd" 2>/dev/null) || continue
-    [[ $path == "$MIRROR_DIR"/* ]] || continue
-    line=$(grep -n -F -- "  ${path##*/}" "$MIRROR_SUMS" | head -n1 | cut -d: -f1)
-    [[ -n $line ]] && { echo $(((line - 1) * 100 / total)); return 0; }
-  done
-  return 1
+  line=$(grep -n -F -- "  ${path##*/}" "$MIRROR_SUMS" | head -n1 | cut -d: -f1)
+  [[ -n $line ]] || return 1
+  echo $(((line - 1) * 100 / total))
 }
 
 # --- boot medium + scheduler (absorbed from omarchy-iso-boot-medium) ---
@@ -117,6 +120,7 @@ await_verdict() {
   UNIT=$1
   local what=$2 load_state state tail msg pct
   local reported=false progress_drawn=false settling=0 unanswered=0
+  local where last_where="" last_move=$SECONDS
   local label="verifying the install medium"
   [[ $UNIT == "$MIRROR_UNIT" ]] && label="verifying the install medium's packages"
   load_state=$(unit_prop LoadState)
@@ -188,6 +192,21 @@ await_verdict() {
         if [[ -n ${OMARCHY_VERIFY_PROGRESS:-} ]] && pct=$(hash_pct); then
           printf '\r%s: %3d%%' "$label" "$pct" >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
           progress_drawn=true
+        fi
+        # A medium that stopped answering stalls the read without failing it,
+        # and the size-based timeout behind it is minutes away: tens of them
+        # for a 4 GB image. When the hasher's offset has not moved for a
+        # minute while an install waits on it, say so now. A slow medium moves
+        # (the slow-medium scenario's 64 KB/s does); a read hung in the driver
+        # does not. No offset to read (between files, /proc gone) is not a
+        # stall: the timeout still stands behind it.
+        if where=$(hash_where); then
+          if [[ $where != "$last_where" ]]; then
+            last_where=$where last_move=$SECONDS
+          elif ((SECONDS - last_move >= ${OMARCHY_VERIFY_STALL_SECONDS:-60})); then
+            finish_progress
+            fail "install medium stopped responding: try another USB stick or port"$'\n'"reading $what made no progress for $((SECONDS - last_move)) s"
+          fi
         fi
         sleep 0.5
         ;;
