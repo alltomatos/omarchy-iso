@@ -2767,11 +2767,14 @@ def validate_boot(ctx: InstallContext) -> None:
         if not limine_binary.exists() or limine_binary.stat().st_size == 0:
             raise RuntimeError(f"{limine_binary} missing or empty")
 
-        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the kernel out
-        # from under us mid-install, so trust what's on disk over what we asked
-        # for and only fall back to the configured name when nothing's there.
+        # Hardware packages (omarchy-hw-intel-ptl, …) can swap the configured
+        # kernel out mid-install, so trust what's on disk over what we asked
+        # for. But while the configured kernel is installed, require its own
+        # UKI: the image always carries the prebuilt stock UKI, which must not
+        # hide a failed linux-t2 build (the rule of omacom/omarchy-iso#145).
         uki_dir = esp_mount / "EFI" / "Linux"
-        candidates = _installed_kernels(ctx) or [kernel]
+        installed_kernels = _installed_kernels(ctx)
+        candidates = [kernel] if kernel in installed_kernels else installed_kernels or [kernel]
         ukis = [uki_dir / f"{uki_prefix}_{name}.efi" for name in candidates]
         if not any(uki.exists() and uki.stat().st_size for uki in ukis):
             raise RuntimeError(f"{' / '.join(str(uki) for uki in ukis)} missing or empty")

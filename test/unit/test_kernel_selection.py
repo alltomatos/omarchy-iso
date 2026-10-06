@@ -209,6 +209,42 @@ class KernelSelectionTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "missing or empty"):
                         phases_impl.validate_boot(ctx)
 
+    def test_boot_validation_requires_the_selected_kernels_own_uki(self):
+        # The image's stock kernel and the selected linux-t2 are both
+        # installed; only the prebuilt stock UKI made it to the ESP.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            files = {
+                "usr/lib/modules/7.2-omarchy/pkgbase": "linux-omarchy\n",
+                "usr/lib/modules/7.2-omarchy/build/include/config/kernel.release": "7.2-omarchy\n",
+                "usr/lib/modules/7.2-t2/pkgbase": "linux-t2\n",
+                "usr/lib/modules/7.2-t2/build/include/config/kernel.release": "7.2-t2\n",
+                "boot/limine.conf": "/Omarchy\n",
+                "etc/kernel/cmdline": "root=UUID=test\n",
+                "etc/default/limine": "CUSTOM_UKI_NAME=omarchy\n",
+                "boot/EFI/limine/limine_x64.efi": "bootloader",
+                "boot/EFI/BOOT/BOOTX64.EFI": "bootloader",
+                "boot/EFI/Linux/omarchy_linux-omarchy.efi": "UKI",
+            }
+            for name, content in files.items():
+                path = target / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            ctx = types.SimpleNamespace(
+                target=target, omarchy_install={"storage": {"kernel": "linux-t2"}},
+                user_configuration={}, encrypt=False,
+                is_protected=False, defer_provisioning=False,
+            )
+            with mock.patch.object(phases_impl, "_assert_boot_hooks_restored"), \
+                 mock.patch.object(phases_impl.arch, "has_uefi", return_value=True, create=True), \
+                 mock.patch.object(phases_impl, "_read_efibootmgr", return_value={
+                     "entries": {"0001": "Limine\tHD(1,GPT,test)"},
+                 }):
+                with self.assertRaisesRegex(RuntimeError, "omarchy_linux-t2.efi missing or empty"):
+                    phases_impl.validate_boot(ctx)
+                (target / "boot/EFI/Linux/omarchy_linux-t2.efi").write_text("UKI")
+                phases_impl.validate_boot(ctx)
+
 
 if __name__ == "__main__":
     unittest.main()
