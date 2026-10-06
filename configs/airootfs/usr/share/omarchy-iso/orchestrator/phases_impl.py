@@ -612,6 +612,23 @@ def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
     raise RuntimeError(f"blkid still reports an old UUID for {device} after the fsid change (want {want})")
 
 
+SYSFS_BLOCK = Path("/sys/class/block")
+
+
+def _medium_bytes_read() -> int | None:
+    """Bytes the kernel has read from the boot medium's block device so far
+    (sectors read, from /sys/class/block/<dev>/stat), or None when there is no
+    block device to ask (a netboot over NFS, a dev tree)."""
+    source = _findmnt_value(BOOT_MEDIUM_MOUNT, "SOURCE")
+    if not source or not source.startswith("/dev/"):
+        return None
+    try:
+        fields = (SYSFS_BLOCK / Path(source).resolve().name / "stat").read_text().split()
+        return int(fields[2]) * 512
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _write_root_image_frames(image: Path, device: str) -> bool:
     """Write the image with omarchy-image-write (builder/omarchy-image-write.c):
     the ISO packs it as independent 256 KiB zstd frames with a seek table,
@@ -703,6 +720,10 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
     with _time_step("F1.umount_target_tree"):
         _umount_tree(target)
 
+    # How much of the image the write had to read off the medium rather than
+    # the page cache: near zero when the verify left it all cached, up to the
+    # whole image on a machine whose RAM could not hold it.
+    medium_before = _medium_bytes_read()
     if ROOT_IMAGE_RAW_ZST.is_file():
         if not _write_root_image_frames(ROOT_IMAGE_RAW_ZST, device):
             _write_root_image_pipe(ROOT_IMAGE_RAW_ZST, device)
@@ -713,6 +734,10 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
                  "conv=sparse,fsync", "oflag=direct", "status=none"],
                 check=True,
             )
+    medium_after = _medium_bytes_read()
+    if medium_before is not None and medium_after is not None:
+        info(f"› read {(medium_after - medium_before) / 1048576:.0f} MiB of the "
+             f"{raw_image.stat().st_size / 1048576:.0f} MiB image off the install medium while writing it")
 
     # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
     # writing the superblocks only; -u rewrites every metadata block of the
