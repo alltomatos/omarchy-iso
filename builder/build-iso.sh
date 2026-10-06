@@ -242,6 +242,28 @@ if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
 fi
 
 mkdir -p /tmp/offlinedb
+# A package name the lists carry but no repository offers any more makes
+# pacman -Syw fail as a whole ("target not found"), and the offline mirror is
+# never written. Third-party repositories do this without notice: arch-mact2
+# replaced apple-bcm-firmware with apple-bcm-firmware-fetcher (a different
+# mechanism, it conflicts with the old name) while the published omarchy
+# package list still names the old one. Sync the databases once, drop the
+# names nothing offers, and warn. A builder cache that still holds the old
+# file hides the failure.
+pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --noconfirm -Sy --dbpath /tmp/offlinedb >/dev/null
+mapfile -t offered < <(pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --dbpath /tmp/offlinedb -Slq | sort -u)
+mapfile -t unresolved < <(comm -23 <(printf '%s\n' "${all_packages[@]}" | sort -u) <(printf '%s\n' "${offered[@]}"))
+if (( ${#unresolved[@]} )); then
+  # Groups and virtual names (base-devel, ttfx, ...) are not in -Slq; keep
+  # anything -Sp can still turn into a download.
+  mapfile -t unresolved < <(for p in "${unresolved[@]}"; do
+    pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --dbpath /tmp/offlinedb -Sp "$p" >/dev/null 2>&1 || echo "$p"; done)
+fi
+if (( ${#unresolved[@]} )); then
+  echo "WARNING: dropping package names no configured repository offers: ${unresolved[*]}" >&2
+  mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${unresolved[@]}"))
+  printf '%s\n' "${unresolved[@]}" > "$build_cache_dir/airootfs/usr/share/omarchy-iso/unresolved-packages.txt"
+fi
 download_offline_packages() {
   pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Syw \
     "${all_packages[@]}" --cachedir "$offline_mirror_dir/" --dbpath /tmp/offlinedb --needed
