@@ -712,8 +712,17 @@ wait_for_unattended_install() {
 
     if grep -qi "installation stopped" <<<"$text"; then
       capture_console "failure-$prefix-stopped"
+      # The unattended path does not authorize root SSH on the live ISO, so
+      # without this the log copies below come back empty. The installer has
+      # exited to a shell on tty1; tty3 is free for the console login.
+      ssh_live_root true 2>/dev/null || bootstrap_live_root_ssh 2>/dev/null || true
       ssh_live_root "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
       ssh_live_root "cat /run/omarchy-install/state.json" >"$RUN_DIR/state.json" 2>/dev/null || true
+      # What the kernel saw: an I/O error in the installer is only explainable
+      # with the block and filesystem messages behind it.
+      ssh_live_root "dmesg" >"$RUN_DIR/dmesg.txt" 2>/dev/null || true
+      ssh_live_root "journalctl -b --no-pager -o short-precise | tail -n 400" >"$RUN_DIR/journal-tail.txt" 2>/dev/null || true
+      ssh_live_root "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS; df -h /mnt /mnt/boot 2>/dev/null; btrfs device stats /mnt 2>/dev/null" >"$RUN_DIR/target-state.txt" 2>/dev/null || true
       echo "Install failed — artifacts saved to $RUN_DIR" >&2
       return 1
     fi
