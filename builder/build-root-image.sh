@@ -237,8 +237,12 @@ sync
 # time, so the UKI is kept in /var/lib/omarchy-iso, where nothing mounts over
 # it.
 mkdir -p "$root/etc/kernel" "$root/etc/mkinitcpio.d" "$root/var/lib/omarchy-iso"
+# systemd.tty.term.console=dumb: see CONSOLE_NO_ANSI_QUERY in the orchestrator
+# (systemd's console size query hangs 1 boot in 10 with Plymouth on the VT).
+# This embedded cmdline is what boots under Secure Boot, where Limine's entry
+# options are ignored.
 cat >"$root/etc/kernel/cmdline" <<'CMDLINE'
-zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0
+zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 systemd.tty.term.console=dumb
 CMDLINE
 
 # The preset names the kernel version explicitly: mkinitcpio treats a glob in
