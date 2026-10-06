@@ -217,14 +217,12 @@ mapfile -t all_packages < <(
 # "target not found". Published Omarchy runtime packages that predate the rename
 # still list it in omarchy-other.packages, so map it here until every channel
 # ships a runtime that names broadcom-wl-dkms itself.
-# arch-mact2 dropped apple-bcm-firmware on 2026-09-16 in favour of
-# apple-bcm-firmware-fetcher, which does the same job (pull the T2 Wi-Fi and
-# Bluetooth firmware off the macOS volume) but only conflicts with the old name
-# rather than replacing it, so pacman cannot follow the rename on its own.
+# apple-bcm-firmware, which arch-mact2 dropped for apple-bcm-firmware-fetcher,
+# is not mapped here: renamed_packages below follows it, into the
+# mirror and into the install scripts that still ask for the old name.
 mapfile -t all_packages < <(
   printf '%s\n' "${all_packages[@]}" |
-    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' \
-      -e 's/^apple-bcm-firmware$/apple-bcm-firmware-fetcher/' |
+    sed -e 's/^broadcom-wl$/broadcom-wl-dkms/' |
     sort -u
 )
 
@@ -259,6 +257,34 @@ if (( ${#unresolved[@]} )); then
   mapfile -t unresolved < <(for p in "${unresolved[@]}"; do
     pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --dbpath /tmp/offlinedb -Sp "$p" >/dev/null 2>&1 || echo "$p"; done)
 fi
+# Dropping a name keeps the build alive but loses whatever needed the package,
+# and the hardware-conditional ones are needed where no VM test looks: the
+# runtime's T2 step asks for apple-bcm-firmware in one pacman -S with linux-t2,
+# its headers, the audio config and t2fanrd, so "target not found" costs a T2
+# Mac all five. A known rename is followed instead: the new name goes
+# into the mirror here, and build-root-image.sh rewrites the old name in the
+# image's install scripts (arch-mact2's package has no provides= for it).
+# Only names nothing offers are looked up, so an entry goes inert by itself
+# once the old name is back or the runtime stops asking for it.
+declare -A renamed_packages=(
+  [apple-bcm-firmware]=apple-bcm-firmware-fetcher
+)
+renamed_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/renamed-packages.txt"
+unresolved_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/unresolved-packages.txt"
+rm -f "$renamed_list" "$unresolved_list"
+still_unresolved=()
+for p in "${unresolved[@]}"; do
+  new=${renamed_packages[$p]:-}
+  if [[ -n $new ]] && printf '%s\n' "${offered[@]}" | grep -Fxq "$new"; then
+    echo "NOTE: $p is gone from every repository; following its rename to $new" >&2
+    all_packages+=("$new")
+    printf '%s %s\n' "$p" "$new" >>"$renamed_list"
+    mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv "$p" | sort -u)
+  else
+    still_unresolved+=("$p")
+  fi
+done
+unresolved=("${still_unresolved[@]}")
 if (( ${#unresolved[@]} )); then
   echo "WARNING: dropping package names no configured repository offers: ${unresolved[*]}" >&2
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${unresolved[@]}"))
@@ -392,6 +418,7 @@ rm -f "$build_cache_dir/airootfs/var/cache/omarchy/rootfs/omarchy-root.btrfs"*
 image_localdb=/tmp/omarchy-root-image-localdb
 echo "[timing] root image start $(date +%s)"
 OMARCHY_IMAGE_LOCALDB_COPY="$image_localdb" \
+  OMARCHY_RENAMED_PACKAGES="$renamed_list" OMARCHY_UNRESOLVED_PACKAGES="$unresolved_list" \
   bash /builder/build-root-image.sh "$image_pacman_conf" "$root_image_stream" "${image_packages[@]}"
 echo "[timing] root image end $(date +%s)"
 
