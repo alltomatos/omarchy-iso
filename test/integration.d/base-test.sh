@@ -91,6 +91,11 @@ check() {
 finish() {
   if ((FAILURES == 0)); then
     log "$SCENARIO passed. Artifacts: $RUN_DIR"
+    # The disk overlays a passed scenario booted are reproducible from the
+    # base image and are the bulk of what a run leaves behind (a hibernate
+    # overlay carries the memory image); on a ramdisk run directory they
+    # are what fills it. Screenshots and logs stay.
+    [[ ${OMARCHY_INTEGRATION_KEEP_DISKS:-0} == 1 ]] || rm -f "$RUN_DIR"/*.qcow2
   else
     log "$SCENARIO FAILED: $FAILURES assertion(s). Artifacts: $RUN_DIR"
     exit 1

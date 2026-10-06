@@ -21,7 +21,13 @@
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 CORRUPT_ISO="$BASE_DIR/corrupt.iso"
-STREAM=arch/x86_64/omarchy-root.btrfs.zst
+# The root image's file name is resolved from the ISO, not assumed
+# (omarchy-root.img.zst for the block copy, omarchy-root.btrfs.zst for a
+# btrfs receive stream): with the wrong name the scenario silently tests
+# nothing.
+STREAM=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
+  tr -d "'" | sed 's|^/||' | head -n1)
+STREAM=${STREAM:-arch/x86_64/omarchy-root.img.zst}
 VERIFY_UNIT=omarchy-root-image-verify.service
 STATE=/run/omarchy-install/state.json
 
@@ -151,6 +157,15 @@ assert_refused() {
 
 # ---------------------------------------------------------------------- main
 
+# The ISO copy is a full 7 GB wherever cp cannot reflink (a tmpfs run
+# directory, ext4); it is only needed while this scenario runs. Chain the
+# harness's own exit handler: replacing it would leave the VM running and
+# its SSH port taken for every scenario after this one.
+corrupt_cleanup() {
+  rm -f "$CORRUPT_ISO"
+  cleanup
+}
+trap corrupt_cleanup EXIT
 corrupt_iso
 install_from_corrupt_medium
 assert_refused
