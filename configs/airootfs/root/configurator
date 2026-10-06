@@ -751,8 +751,14 @@ run_partition_execute() {
     fi
 
     step "Creating Btrfs filesystem and subvolumes"
+    # -K: no whole-device TRIM first. mkfs.btrfs discards the entire
+    # partition by default, which through dm-crypt takes seconds on a 1 TB
+    # SSD (and much longer on a DRAM-less one), before the install timer even
+    # starts. The root image is written over this filesystem anyway, and the
+    # installed system's fstrim.timer discards free space on its own; the
+    # full-disk path does the same through archinstall (archinstall_adapter).
     disk_step "creating the Btrfs filesystem on $root_mapper" \
-      mkfs.btrfs -f -L OMARCHY "$root_mapper"
+      mkfs.btrfs -K -f -L OMARCHY "$root_mapper"
     wait_for_device "$root_mapper" || disk_abort_hook "Root device $root_mapper never appeared"
 
     mkdir -p /mnt/btrfs-root
