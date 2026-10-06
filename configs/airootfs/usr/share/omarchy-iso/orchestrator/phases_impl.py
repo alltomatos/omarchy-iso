@@ -1727,6 +1727,15 @@ def _partition_guid(disk: Path, part: int) -> str:
     return ""
 
 
+def _mounted_partition_guid(mountpoint: Path) -> str:
+    """The GPT partition GUID of what is mounted at `mountpoint`, lower case,
+    as efibootmgr prints it; "" if unknown."""
+    source = capture(["findmnt", "-no", "SOURCE", str(mountpoint)]).stdout.strip()
+    if not source:
+        return ""
+    return capture(["lsblk", "-ndo", "PARTUUID", source]).stdout.strip().lower()
+
+
 def _split_partition_device(part_dev: str) -> tuple[str, int]:
     parent = capture_identifier(
         ["lsblk", "-ndo", "PKNAME", part_dev], f"the parent disk of {part_dev}"
@@ -2753,7 +2762,15 @@ def _validate_uefi_boot_routes(esp_mount: Path) -> None:
     """
     fallback_binary = esp_mount / "EFI" / "BOOT" / "BOOTX64.EFI"
     has_fallback = fallback_binary.exists() and fallback_binary.stat().st_size > 0
-    has_entry = bool(_find_label_entries(_read_efibootmgr()["entries"], "Limine"))
+    # Only an entry naming this ESP counts: next to another Omarchy, its
+    # "Limine" entry says nothing about whether ours survived. If the ESP's
+    # GUID cannot be read, any "Limine" entry does.
+    esp = _mounted_partition_guid(esp_mount)
+    entries = _read_efibootmgr()["entries"]
+    has_entry = any(
+        not esp or esp in entries[num].lower()
+        for num in _find_label_entries(entries, "Limine")
+    )
 
     if not has_entry and not has_fallback:
         raise RuntimeError(

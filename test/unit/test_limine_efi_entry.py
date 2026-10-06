@@ -62,11 +62,18 @@ json.dump(nvram, open(path, "w"))
 
 FAKE_LSBLK = r'''#!/usr/bin/env python3
 import json, os, sys
-disk = sys.argv[-1]
+dev = sys.argv[-1]
 for key, guid in json.loads(os.environ["FAKE_GUIDS"]).items():
-    d, part = key.rsplit(":", 1)
-    if d == disk:
+    disk, part = key.rsplit(":", 1)
+    if "PARTN,PARTUUID" in sys.argv and disk == dev:
         print(part, guid)
+    elif "PARTUUID" in sys.argv and dev == f"{disk}p{part}":
+        print(guid)
+'''
+
+FAKE_FINDMNT = r'''#!/usr/bin/env python3
+import os
+print(os.environ.get("FAKE_ESP_SOURCE", ""))
 '''
 
 
@@ -76,7 +83,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)], check=False))
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name, text in (("efibootmgr", FAKE_EFIBOOTMGR), ("lsblk", FAKE_LSBLK)):
+        for name, text in (("efibootmgr", FAKE_EFIBOOTMGR), ("lsblk", FAKE_LSBLK), ("findmnt", FAKE_FINDMNT)):
             (bin_dir / name).write_text(text)
             (bin_dir / name).chmod(0o755)
         self.nvram = self.tmp / "nvram.json"
@@ -88,6 +95,7 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
                 "/dev/nvme1n1:1": OTHER,
                 "/dev/nvme0n1:1": WINDOWS,
             }),
+            "FAKE_ESP_SOURCE": "/dev/nvme1n1p3",
         }
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
@@ -151,6 +159,19 @@ class RegisterLimineEfiEntryTest(unittest.TestCase):
         nvram = self.register()
         self.assertEqual(nvram["order"], ["0000"])
         self.assertIn(OURS, nvram["entries"]["0000"][1])
+
+
+    def test_boot_check_does_not_count_another_installs_entry(self):
+        # validate_boot: our entry was dropped and no fallback was deployed.
+        # The other install's "Limine" entry must not pass for ours.
+        esp = self.tmp / "esp"
+        esp.mkdir()
+        self.nvram_with({"0004": self.entry("Limine", OTHER)}, ["0004"])
+        with mock.patch.object(phases_impl, "error", lambda _message: None):
+            with self.assertRaises(RuntimeError):
+                phases_impl._validate_uefi_boot_routes(esp)
+            self.nvram_with({"0004": self.entry("Limine", OTHER), "0005": self.entry("Limine", OURS, part=3)}, ["0005", "0004"])
+            phases_impl._validate_uefi_boot_routes(esp)
 
 
 if __name__ == "__main__":
