@@ -225,7 +225,12 @@ image_kver=$(ls -1 "$root/usr/lib/modules/" | grep -E '^[0-9]+\.' | head -1)
 if [[ -z $image_kver ]]; then
   echo "WARNING: no kernel version found under /usr/lib/modules/; skipping the UKI pre-build"
 else
-  cat >"$root/etc/mkinitcpio.d/linux.preset" <<PRESET
+  # The kernel package this image carries: linux-omarchy since upstream made it
+  # the default, stock linux before. The installer names the UKI
+  # and its Limine entry after it.
+  image_kernel=$(<"$root/usr/lib/modules/${image_kver}/pkgbase")
+  echo "$image_kernel" >"$root/var/lib/omarchy-iso/prebuilt-uki.kernel"
+  cat >"$root/etc/mkinitcpio.d/${image_kernel}.preset" <<PRESET
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/usr/lib/modules/${image_kver}/vmlinuz"
 PRESETS=('default')

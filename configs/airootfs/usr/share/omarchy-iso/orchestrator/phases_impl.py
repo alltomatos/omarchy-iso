@@ -433,7 +433,15 @@ def arch_install_system(ctx: InstallContext) -> None:
             # Headers are optional kernel dependencies. Install them before any
             # DKMS package so generic installs have them too, and module builds
             # use the target kernel instead of the live ISO's kernel.
-            installer.add_additional_packages([f"{kernel}-headers" for kernel in config.kernels])
+            # The root image carries the default kernel's headers, so this
+            # is a pacman run only for a kernel the image does not hold (linux-t2).
+            missing_headers = [
+                f"{kernel}-headers" for kernel in config.kernels
+                if not arch.target_has_package(installer.target, f"{kernel}-headers")
+            ]
+            if missing_headers:
+                with _time_step(f"STEP.kernel_headers ({' '.join(missing_headers)})"):
+                    installer.add_additional_packages(missing_headers)
 
             with _time_step("STEP.configure_keyboard"):
                 if not configure_keyboard(installer.target, kb_layout):
@@ -1888,7 +1896,11 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # no timeout. limine-mkinitcpio reads the drop-ins, so the install-time
     # build produces a working initramfs; an encrypted install pays the ~4s.
     prebuilt_uki = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.efi"
-    esp_uki = ctx.target / "boot" / "EFI" / "Linux" / "omarchy_linux.efi"
+    # Limine names a UKI after the kernel package it belongs to, and the image
+    # records which one it was built with (stock linux on older images).
+    prebuilt_kernel_file = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.kernel"
+    prebuilt_kernel = prebuilt_kernel_file.read_text().strip() if prebuilt_kernel_file.is_file() else "linux"
+    esp_uki = ctx.target / "boot" / "EFI" / "Linux" / f"omarchy_{prebuilt_kernel}.efi"
     if prebuilt_uki.is_file() and "cryptdevice=" not in cmdline:
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
@@ -1901,7 +1913,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         with _time_step("LIMINE.limine-entry-tool --add-uki (register boot entry)"):
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "limine-entry-tool",
-                 "--add-uki", "linux", "/boot/EFI/Linux/omarchy_linux.efi",
+                 "--add-uki", prebuilt_kernel, f"/boot/EFI/Linux/omarchy_{prebuilt_kernel}.efi",
                  "--comment", "Pre-built UKI",
                  "--no-mutex", "--no-hooks"],
                 check=True,
