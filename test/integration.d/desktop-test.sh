@@ -267,6 +267,34 @@ audio-panel|meta_l-ctrl-a|omarchy-keyboard-panel|omarchy.audio'
   cleanup_shortcut_state
 }
 
+# ---------------------------------------------------------- browser launches
+
+# The browser the way the session starts it for a link (xdg-open, a login
+# flow, a notification): a transient user unit running uwsm-app with a URL,
+# on a profile that has never been used. On real hardware that exact launch
+# died once with SIGSEGV 2.2 s in, before any window (first boot of a fresh
+# install). 24 such launches in VMs were clean, so this guards
+# the path rather than reproduces the crash: a window must appear and no
+# core may be recorded, each time on a fresh profile.
+browser_launch_phase() {
+  local launches=${OMARCHY_BROWSER_LAUNCHES:-3} i out failed=0
+
+  for ((i = 1; i <= launches; i++)); do
+    out=$(ssh_session "pkill -x chromium 2>/dev/null; sleep 1; rm -rf ~/.config/chromium ~/.cache/chromium; \
+      before=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
+      systemd-run --user --quiet --collect --unit=omarchy-browser-smoke-$i-\$RANDOM uwsm-app -- /usr/bin/chromium 'https://example.com/?omarchy-smoke=$i'; \
+      sleep 9; \
+      after=\$(coredumpctl list --no-legend 2>/dev/null | grep -c chromium); \
+      windows=\$(hyprctl -j clients | jq '[.[] | select(.class | test(\"(?i)chrom\"))] | length'); \
+      echo \"cores \$before->\$after windows \$windows\"" 2>/dev/null)
+    echo "    fresh-profile launch $i: ${out:-no answer}"
+    [[ $out =~ ^cores\ ([0-9]+)-\>([0-9]+)\ windows\ ([0-9]+)$ ]] &&
+      [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" && ${BASH_REMATCH[3]} -ge 1 ]] || ((failed += 1))
+  done
+  check "chromium opens a link on a fresh profile, $launches times, without a core dump (failed: $failed)" test "$failed" -eq 0
+  ssh_session "pkill -x chromium" >/dev/null 2>&1 || true
+}
+
 # ------------------------------------------------------- reaching the desktop
 
 ssh_ready() { ssh_guest true; }
@@ -325,5 +353,6 @@ reach_desktop() {
 
 if reach_desktop; then
   shortcut_smoke_phase
+  browser_launch_phase
 fi
 finish
