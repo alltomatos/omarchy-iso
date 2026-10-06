@@ -590,6 +590,23 @@ echo "[timing] mkarchiso start $(date +%s)"
 mkarchiso -v -w "$build_cache_dir/work/" -o /out/ "$build_cache_dir/"
 echo "[timing] mkarchiso end $(date +%s)"
 
+# The live initramfs must stay small enough for GRUB and the kernel to place
+# it. omarchy-iso#128: at 241 MiB (every DRM driver's firmware, via the kms
+# hook) GRUB could not allocate it on a Lenovo Yoga's EFI memory map and booted
+# the kernel without it; measured under OVMF it needs 1 GB of RAM where the
+# 91 MiB one boots in 512 MB. 128 MiB leaves headroom over today's size and
+# none for that class of regression.
+live_initramfs_limit=$((128 * 1024 * 1024))
+for live_initramfs in "$build_cache_dir/work/iso/${iso_subdir%/*}/boot/x86_64"/initramfs-*.img; do
+  [[ -f $live_initramfs ]] || { echo "ERROR: no live initramfs under work/iso/${iso_subdir%/*}/boot/x86_64" >&2; exit 1; }
+  live_initramfs_bytes=$(stat -c %s "$live_initramfs")
+  echo "live initramfs $(basename "$live_initramfs"): $live_initramfs_bytes bytes"
+  if (( live_initramfs_bytes > live_initramfs_limit )); then
+    echo "ERROR: live initramfs is $live_initramfs_bytes bytes, over the $live_initramfs_limit limit (omarchy-iso#128)" >&2
+    exit 1
+  fi
+done
+
 # Match host UID/GID on output.
 if [[ -n $HOST_UID && -n $HOST_GID ]]; then
   chown -R "$HOST_UID:$HOST_GID" /out/
