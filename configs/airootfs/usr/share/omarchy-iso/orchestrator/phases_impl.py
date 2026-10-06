@@ -138,6 +138,21 @@ def _omarchy_nvim_package() -> str:
 # the install log (/var/log/omarchy-install.log).
 from contextlib import contextmanager as _contextmanager
 
+def _check_dd_full_blocks(dd_stderr: str) -> None:
+    """dd reports "N+M records out": N full blocks, M partial ones. More than
+    one partial block means dd wrote pipe-sized pieces without O_DIRECT (see
+    the image write), which costs a real disk a minute and a half and is
+    invisible in a VM, so say so in the install log."""
+    match = re.search(r"(\d+)\+(\d+) records out", dd_stderr or "")
+    if not match:
+        return
+    full, partial = int(match.group(1)), int(match.group(2))
+    info(f"› image write: {full} full blocks, {partial} partial")
+    if partial > 1:
+        info(f"› WARNING: dd wrote {partial} partial blocks; the image write "
+             "was buffered, not direct (iflag=fullblock missing?)")
+
+
 @_contextmanager
 def _time_step(label: str):
     _t0 = time.monotonic()
@@ -601,11 +616,24 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
         with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
             # dd blocks on its writes, so the pipe paces zstd to the disk,
             # and the decoding runs on another core.
-            subprocess.run(
-                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=64M "
-                f"conv=sparse,fsync oflag=direct status=none",
-                shell=True, check=True,
+            #
+            # iflag=fullblock is what makes oflag=direct true. A read from a
+            # pipe returns at most one pipe buffer (64 KiB), dd treats that
+            # as a partial block, and for a partial block it silently drops
+            # O_DIRECT, so without fullblock every write is buffered. On a
+            # LUKS mapper with 512-byte sectors the block device's writeback
+            # then goes out 512 bytes at a time: 2 million NVMe requests per
+            # GiB, 87 s for this image on a 980 PRO against 2.7 s
+            # with full blocks. QEMU hides it (4.9 s there), real disks do
+            # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
+            # 64M slower (on the same drive, stream in RAM).
+            # status=noxfer keeps dd's record counts for the check below.
+            proc = subprocess.run(
+                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=2M "
+                f"iflag=fullblock conv=sparse,fsync oflag=direct status=noxfer",
+                shell=True, check=True, stderr=subprocess.PIPE, text=True,
             )
+            _check_dd_full_blocks(proc.stderr)
     else:
         with _time_step("F1.dd (oflag=direct)"):
             subprocess.run(
