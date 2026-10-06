@@ -169,10 +169,15 @@ await_verdict() {
         # sha256sum's lines reach the journal through journald's stream and can
         # land a moment after systemd reports the unit failed. Its last line is
         # the "WARNING: ..." summary (did NOT match, could not be read), so read
-        # again for up to 2 s until that is there.
+        # again until that is there: for up to 10 s, which only a failed
+        # install waits, because journald can be slow when the hash has filled
+        # a small machine's memory with page cache. The lines are matched by
+        # the unit's cgroup, not by _COMM=sha256sum: journald fills _COMM from
+        # its cached view of the stream's writer, which can be the pre-exec
+        # "(sha256sum)".
         journalctl --sync >/dev/null 2>&1 || true
-        for _ in {1..10}; do
-          tail=$(journalctl -b -u "$UNIT" _COMM=sha256sum --no-pager -o cat 2>/dev/null)
+        for _ in {1..50}; do
+          tail=$(journalctl -b _SYSTEMD_UNIT="$UNIT" --no-pager -o cat 2>/dev/null)
           [[ $tail == *"WARNING:"* ]] && break
           sleep 0.2
         done
