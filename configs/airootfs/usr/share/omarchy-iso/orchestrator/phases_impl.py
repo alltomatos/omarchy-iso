@@ -134,7 +134,28 @@ def _omarchy_nvim_package() -> str:
 # build-iso.sh ships it as a plain file on the ISO, read straight off the
 # boot medium, with sha256sum output for it (the compressed file) next to it.
 # The subvolume name is what build-root-image.sh sends.
+# Sub-step timing: anything that takes 0.05 s or more gets a [step] line in
+# the install log (/var/log/omarchy-install.log).
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+def _time_step(label: str):
+    _t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        _elapsed = time.monotonic() - _t0
+        if _elapsed >= 0.05:
+            info(f"[step] {label}: {_elapsed:.3f}s")
+
+
 ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst")
+# The btrfs filesystem image build-root-image.sh emits. When the ISO carries
+# it, the installer writes it onto the target partition and gives the
+# filesystem a new fsid; without it, the install falls back to the stream.
+ROOT_IMAGE_RAW = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img")
+# The same image, zstd-compressed: what the ISO ships.
+ROOT_IMAGE_RAW_ZST = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.img.zst")
 # Decompresses the outer layer in the receive pipe. --long=27 mirrors the
 # compressing side's window: it is within the decoder's default 128 MiB
 # acceptance limit, but saying it here keeps the pair visibly in step with
@@ -368,23 +389,24 @@ def arch_install_system(ctx: InstallContext) -> None:
 
     if not pre_mounted:
         info("› partitioning + formatting + encrypting")
-        arch.perform_filesystem_operations(config)
+        with _time_step("STEP.perform_filesystem_operations"):
+            arch.perform_filesystem_operations(config)
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
         if not pre_mounted:
-            installer.mount_ordered_layout()
+            with _time_step("STEP.mount_ordered_layout"):
+                installer.mount_ordered_layout()
 
-        installer.sanity_check(
-            offline=True,
-            skip_ntp=True,
-            skip_wkd=True,
-        )
+        with _time_step("STEP.sanity_check"):
+            installer.sanity_check(
+                offline=True,
+                skip_ntp=True,
+                skip_wkd=True,
+            )
 
-        # Before anything writes into the target: the image replaces the
-        # (empty) root subvolume archinstall created, and everything written
-        # there first would go with it.
-        _install_root_image(ctx)
+        with _time_step("STEP.install_root_image"):
+            _install_root_image(ctx)
 
         if not pre_mounted and arch.is_encrypted(config):
             installer.generate_key_files()
@@ -396,40 +418,43 @@ def arch_install_system(ctx: InstallContext) -> None:
         _mask_mkinitcpio_pacman_hooks(ctx)
         try:
             info("› installing per-machine packages (mkinitcpio deferred to final Limine UKI build)")
-            # An empty kb_layout makes archinstall's set_keyboard_language skip
-            # booting the target in a container just to run localectl; the
-            # keymap is configured offline right after instead.
             kb_layout = config.locale_config.kb_layout if config.locale_config else ""
-            arch.install_base_delta(
-                installer,
-                config,
-                hostname=config.hostname,
-                locale_config=(
-                    replace(config.locale_config, kb_layout="")
-                    if config.locale_config else None
-                ),
-            )
+            with _time_step("STEP.install_base_delta"):
+                arch.install_base_delta(
+                    installer,
+                    config,
+                    hostname=config.hostname,
+                    locale_config=(
+                        replace(config.locale_config, kb_layout="")
+                        if config.locale_config else None
+                    ),
+                )
 
             # Headers are optional kernel dependencies. Install them before any
             # DKMS package so generic installs have them too, and module builds
             # use the target kernel instead of the live ISO's kernel.
             installer.add_additional_packages([f"{kernel}-headers" for kernel in config.kernels])
 
-            if not configure_keyboard(installer.target, kb_layout):
-                error(f"Invalid keyboard language specified: {kb_layout}")
+            with _time_step("STEP.configure_keyboard"):
+                if not configure_keyboard(installer.target, kb_layout):
+                    error(f"Invalid keyboard language specified: {kb_layout}")
 
             if config.mirror_config:
-                installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
+                with _time_step("STEP.set_mirrors on-target"):
+                    installer.set_mirrors(mirror_handler, config.mirror_config, on_target=True)
 
             if config.swap and config.swap.enabled:
-                arch.setup_zram_swap(installer)
-                _drop_archinstall_zram_conf(ctx)
+                with _time_step("STEP.setup_zram_swap"):
+                    arch.setup_zram_swap(installer)
+                    _drop_archinstall_zram_conf(ctx)
 
-            _configure_limine_boot(ctx, installer, config)
+            with _time_step("STEP.configure_limine_boot (mkinitcpio + ukify + limine-install)"):
+                _configure_limine_boot(ctx, installer, config)
 
             info("› creating user (with /etc/skel populated)")
             if config.auth_config and config.auth_config.users:
-                installer.create_users(config.auth_config.users)
+                with _time_step("STEP.create_users"):
+                    installer.create_users(config.auth_config.users)
 
             if config.app_config:
                 # The image carries the PipeWire packages; this adds the audio
@@ -525,7 +550,92 @@ def _root_image_target_mounts(target: Path) -> tuple[list[dict], str]:
     return mounts, device
 
 
+def _install_root_image_dd(ctx: InstallContext) -> None:
+    """Write the pre-built btrfs image straight onto the target partition, then
+    give the filesystem a new fsid. Same result as the btrfs receive path, the
+    same packages in the same @ subvolume layout, about five times faster
+    because nothing is decoded per extent."""
+    target = ctx.target
+    # The compressed image if the ISO has it, the plain one otherwise. One of
+    # the two exists, or _install_root_image would not have called this.
+    raw_image = ROOT_IMAGE_RAW_ZST if ROOT_IMAGE_RAW_ZST.is_file() else ROOT_IMAGE_RAW
+    mounts, device = _root_image_target_mounts(target)
+
+    info(f"› writing root image ({raw_image.stat().st_size >> 20} MiB from {raw_image})")
+
+    with _time_step("F1.umount_target_tree"):
+        _umount_tree(target)
+
+    if ROOT_IMAGE_RAW_ZST.is_file():
+        with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
+            # dd blocks on its writes, so the pipe paces zstd to the disk,
+            # and the decoding runs on another core.
+            subprocess.run(
+                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=64M "
+                f"conv=sparse,fsync oflag=direct status=none",
+                shell=True, check=True,
+            )
+    else:
+        with _time_step("F1.dd (oflag=direct)"):
+            subprocess.run(
+                ["dd", f"if={raw_image}", f"of={device}", "bs=64M",
+                 "conv=sparse,fsync", "oflag=direct", "status=none"],
+                check=True,
+            )
+
+    with _time_step("F1.btrfstune -u"):
+        subprocess.run(["btrfstune", "-f", "-u", device], check=True)
+
+    # Give the filesystem the layout archinstall's fstab expects. The write
+    # replaced the empty @, @home, @log and @pkg subvolumes archinstall had
+    # created, and the image holds a single subvolume named
+    # ROOT_IMAGE_SUBVOLUME: rename that one to @ and create the others again.
+    # Then grow the filesystem, which was shrunk for the ISO, to fill the
+    # partition.
+    top = ctx.state_dir / "image-top"
+    top.mkdir(parents=True, exist_ok=True)
+    with _time_step("F1.mount_top_for_reshape"):
+        subprocess.run(["mount", "-o", "subvolid=5", device, str(top)], check=True)
+    try:
+        with _time_step("F1.btrfs_resize_max"):
+            subprocess.run(["btrfs", "filesystem", "resize", "max", str(top)], check=True)
+
+        received = top / ROOT_IMAGE_SUBVOLUME
+        at_subvol = top / "@"
+        with _time_step("F1.mv_omarchy-root_to_@"):
+            received.rename(at_subvol)
+
+        with _time_step("F1.create_@home_@log_@pkg"):
+            for name in ("@home", "@log", "@pkg"):
+                p = top / name
+                if not p.exists():
+                    subprocess.run(["btrfs", "subvolume", "create", str(p)],
+                                   check=True, capture_output=True)
+
+        with _time_step("F1.copy_pacman_log"):
+            image_log = at_subvol / "var" / "log" / "pacman.log"
+            log_subvol = top / "@log"
+            if image_log.is_file() and log_subvol.is_dir():
+                shutil.copy2(image_log, log_subvol / "pacman.log")
+    finally:
+        subprocess.run(["umount", str(top)], check=False)
+
+    with _time_step("F1.remount_subvols_on_target"):
+        for mount in mounts:
+            mountpoint = Path(mount["target"])
+            mountpoint.mkdir(parents=True, exist_ok=True)
+            opts = _remount_option_string(mount["options"] or "")
+            source = (mount["source"] or "").split("[")[0]
+            subprocess.run(["mount", "-o", opts, source, str(mountpoint)], check=True)
+
+    _write_phase_progress(ctx, 1.0)
+
+
 def _install_root_image(ctx: InstallContext) -> None:
+    # Block copy when the ISO carries the image, btrfs receive otherwise.
+    if ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file():
+        return _install_root_image_dd(ctx)
+
     target = ctx.target
     stream = _root_image_stream()
     mounts, device = _root_image_target_mounts(target)
@@ -1702,12 +1812,34 @@ def _stage_provisioning_luks_unlock(ctx: InstallContext, provisioning_dir) -> No
     files_dropin.write_text("FILES+=(/etc/omarchy/provisioning.key)\n")
 
 
+def _is_apple_t2_hardware() -> bool:
+    """Only Apple T2 Macs need the linux-t2 kernel. Everywhere else its
+    mkinitcpio preset is dropped, so the boot step does not build and register
+    an initramfs and a UKI for a second kernel."""
+    try:
+        result = subprocess.run(
+            ["dmidecode", "-s", "system-manufacturer"],
+            capture_output=True, text=True, check=True
+        )
+        return "apple" in result.stdout.strip().lower()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
 def finalize_limine_boot(ctx: InstallContext) -> None:
     """Finalize Limine after target system setup has written all dynamic
     boot drop-ins (hibernation, hardware quirks, protected-mode ESP settings).
     """
     if not (ctx.target / "usr" / "bin" / "limine-update").exists():
         raise RuntimeError("/usr/bin/limine-update missing in target")
+
+    # Skip the linux-t2 mkinitcpio work on non-Apple hardware.
+    if not _is_apple_t2_hardware():
+        for preset in ("linux-t2.preset",):
+            path = ctx.target / "etc" / "mkinitcpio.d" / preset
+            if path.exists():
+                path.unlink()
+                info(f"› not Apple T2 hardware: skipped {preset}")
 
     default_limine = ctx.target / "etc" / "default" / "limine"
     if not default_limine.exists():
@@ -1737,7 +1869,49 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     if not limine_conf.exists():
         raise RuntimeError(f"{limine_conf} missing")
 
-    subprocess.run(["arch-chroot", str(ctx.target), "limine-update"], check=True)
+    # limine-update, run as its two steps so that each is timed.
+    with _time_step("LIMINE.limine-install --no-efi-register"):
+        subprocess.run(
+            ["arch-chroot", str(ctx.target), "limine-install", "--no-efi-register"],
+            check=True,
+        )
+
+    # With a pre-built UKI in the image, copy it to the ESP and skip the ~4 s
+    # of limine-mkinitcpio. Without one, build it here as before.
+    #
+    # Encrypted installs must NOT take the pre-baked path. The build-time bake
+    # runs `mkinitcpio -c /etc/mkinitcpio.conf`, and naming the config
+    # explicitly makes mkinitcpio skip /etc/mkinitcpio.conf.d/*.conf — which is
+    # where omarchy_hooks.conf adds the `encrypt` hook. The baked initramfs
+    # therefore carries no encrypt hook and no dm_crypt module, so
+    # /dev/mapper/root is never created and systemd waits for it forever with
+    # no timeout. limine-mkinitcpio reads the drop-ins, so the install-time
+    # build produces a working initramfs; an encrypted install pays the ~4s.
+    prebuilt_uki = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.efi"
+    esp_uki = ctx.target / "boot" / "EFI" / "Linux" / "omarchy_linux.efi"
+    if prebuilt_uki.is_file() and "cryptdevice=" not in cmdline:
+        with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
+            esp_uki.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(prebuilt_uki, esp_uki)
+            info(f"› deployed pre-built UKI ({prebuilt_uki.stat().st_size >> 20} MiB)")
+        # Register the boot entry in limine.conf, which limine-mkinitcpio
+        # would have done after building the UKI. Without it limine.conf has
+        # no Omarchy entry and the firmware menu comes up instead. Mirrors
+        # install_uki() in limine-mkinitcpio-install.
+        with _time_step("LIMINE.limine-entry-tool --add-uki (register boot entry)"):
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "limine-entry-tool",
+                 "--add-uki", "linux", "/boot/EFI/Linux/omarchy_linux.efi",
+                 "--comment", "Pre-built UKI",
+                 "--no-mutex", "--no-hooks"],
+                check=True,
+            )
+    else:
+        with _time_step("LIMINE.limine-mkinitcpio (fallback — no pre-built UKI, or encrypted)"):
+            subprocess.run(
+                ["arch-chroot", str(ctx.target), "limine-mkinitcpio"],
+                check=True,
+            )
 
     subprocess.run(
         ["arch-chroot", str(ctx.target), "btrfs", "quota", "disable", "/"],
