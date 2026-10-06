@@ -27,6 +27,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs/airootfs/u
 sys.modules.setdefault(
     "orchestrator.archinstall_adapter", types.ModuleType("orchestrator.archinstall_adapter")
 )
+# _write_limine_defaults imports luks_tuning, which imports four archinstall
+# names at load time; archinstall only exists on the ISO, and the cmdline
+# helper these tests reach uses none of them.
+_archinstall_names = {
+    "archinstall.lib.command": {"run": subprocess.run},
+    "archinstall.lib.disk.luks": {
+        "Luks2": type("Luks2", (), {name: lambda *_: None for name in ("encrypt", "unlock", "lock")}),
+    },
+    "archinstall.lib.exceptions": {"DiskError": type("DiskError", (Exception,), {})},
+    "archinstall.lib.log": {"debug": lambda *_args, **_kwargs: None},
+}
+for _package in ("archinstall", "archinstall.lib", "archinstall.lib.disk"):
+    sys.modules.setdefault(_package, types.ModuleType(_package)).__path__ = []
+for _name, _attrs in _archinstall_names.items():
+    _module = sys.modules.setdefault(_name, types.ModuleType(_name))
+    for _attr, _value in _attrs.items():
+        if not hasattr(_module, _attr):
+            setattr(_module, _attr, _value)
 
 from orchestrator import phases_impl  # noqa: E402
 from orchestrator.context import InstallContext, _default_omarchy_install  # noqa: E402
