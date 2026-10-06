@@ -146,8 +146,19 @@ install_from_slow_medium() {
   ssh_live_root "journalctl -b -u $VERIFY_UNIT -o short-precise --no-pager" >"$RUN_DIR/verify-unit.journal" 2>/dev/null || true
 }
 
+# A dashboard assertion reads a live screen, so give the screen a few seconds
+# to be readable instead of judging one frame: a console that blanked after
+# ten idle minutes needs the unblank in ocr_screen to land, a repaint can be
+# caught half-done, and OCR of a single frame is not perfectly repeatable.
+# The pattern is an extended regex so a word broken by a hyphen can be
+# matched loosely.
 screen_shows() {
-  ocr_screen | grep -qi "$1"
+  local pattern="$1" deadline=$((SECONDS + 20))
+
+  until ocr_screen | grep -qiE "$pattern"; do
+    ((SECONDS >= deadline)) && return 1
+    sleep 2
+  done
 }
 
 assert_named_slow() {
