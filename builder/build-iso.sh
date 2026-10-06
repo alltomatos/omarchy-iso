@@ -112,12 +112,17 @@ if [[ -d /omarchy-source && -d /omarchy-pkgs ]]; then
   done
 fi
 
-# Node.js binary for offline mise install.
-NODE_DIST_URL="https://nodejs.org/dist/latest"
-NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
+# Node.js binary for offline mise install. The version is resolved from the
+# "latest" alias, the file is fetched from its own versioned directory: the
+# alias directory changes under a release, and a CDN edge can answer 404 for
+# the new filename there for hours. Versioned paths never change once
+# published.
+NODE_DIST="https://nodejs.org/dist"
+NODE_SHASUMS=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 "$NODE_DIST/latest/SHASUMS256.txt")
 NODE_FILENAME=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $2}')
 NODE_SHA=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $1}')
-curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
+NODE_VERSION=${NODE_FILENAME#node-}; NODE_VERSION=${NODE_VERSION%%-*}
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 "$NODE_DIST/$NODE_VERSION/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
 echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c -
 mkdir -p "$build_cache_dir/airootfs/opt/packages/"
 cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
