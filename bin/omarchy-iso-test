@@ -55,6 +55,17 @@ SYNC_DIR=""
 SYNC_ALL=false
 
 KEYBOARD_LABEL="English (US)"
+# --fake-pci VENDOR:DEVICE:CLASS (hex, repeatable): hardware the VM should claim
+# to have, e.g. 10de:2684:030000 (an RTX 4090) or 106b:1802:088000 (an Apple
+# T2). Each is a vfio-user device whose IDs QEMU overrides: a real PCI function
+# in the guest (lspci, sysfs, udev, modalias) that no driver can drive. What it
+# exercises is everything that keys off the hardware being there: detection,
+# the packages and kernel the install picks, DKMS builds, boot configuration.
+# Needs QEMU 10.1 and a vfio-user server ($VFIO_USER_SERVER, by default
+# libvfio-user's gpio-pci-idio-16 sample); see test/fake-pci.md.
+FAKE_PCI=()
+FAKE_PCI_PIDS=()
+
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
 GUEST_HOSTNAME="omarchy-test"
@@ -74,6 +85,7 @@ while (($#)); do
     --port) SSH_PORT="$2"; shift ;;
     --memory) MEMORY="$2"; shift ;;
     --timeout) INSTALL_TIMEOUT="$2"; shift ;;
+    --fake-pci) FAKE_PCI+=("$2"); shift ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *) ISO="$1" ;;
   esac
@@ -226,10 +238,32 @@ start_vm() {
   # virtio-gpu before the system comes up.
   log "Watch (do not resize): vncviewer -RemoteResize=0 127.0.0.1:5905"
 
+  # vfio-user maps guest memory into the device process, so it has to be a
+  # shareable memfd; only when a fake device is asked for.
+  local fake_args=() spec sock vendor device class index=0
+  for pid in "${FAKE_PCI_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  FAKE_PCI_PIDS=()
+  for spec in "${FAKE_PCI[@]}"; do
+    IFS=: read -r vendor device class <<<"$spec"
+    sock="${QMP_SOCK%.sock}.fakepci$index.sock"
+    rm -f "$sock"
+    "${VFIO_USER_SERVER:-gpio-pci-idio-16}" "$sock" 2>>"$RUN_DIR/fakepci.log" &
+    FAKE_PCI_PIDS+=($!)
+    for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "the vfio-user server did not come up for $spec (see test/fake-pci.md)" >&2; return 1; }
+    fake_args+=(-device "{\"driver\":\"vfio-user-pci\",\"socket\":{\"path\":\"$sock\",\"type\":\"unix\"},\"x-pci-vendor-id\":$((16#$vendor)),\"x-pci-device-id\":$((16#$device)),\"x-pci-class-code\":$((16#$class))}")
+    index=$((index + 1))
+  done
+  if ((${#FAKE_PCI[@]})); then
+    fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa node,memdev=fakepcimem)
+    log "Fake PCI hardware: ${FAKE_PCI[*]}"
+  fi
+
   qemu-system-x86_64 \
     -cpu host -enable-kvm -machine q35,accel=kvm \
     -smp "$(nproc)" \
     -m "$MEMORY" \
+    "${fake_args[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,file="$BASE_OVMF" \
     -drive file="$disk",format=qcow2,if=none,id=drive0 \
