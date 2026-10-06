@@ -226,12 +226,36 @@ mapfile -t all_packages < <(
     sort -u
 )
 
+# The names an install can ask pacman for: everything above except the live
+# system's own package list (packages.x86_64). The live root is pacstrapped
+# from the same mirror, so its tools (grub, nmap, vim, espeak-ng, man pages ...)
+# are downloaded too, but nothing on the target ever installs them; see the
+# shipped-mirror selection below.
+declare -a target_packages
+mapfile -t target_packages < <(
+  {
+    grep -hv '^#\|^$' "${base_pkg_lists[@]}"
+    grep -hv '^#\|^$' /builder/archinstall.packages
+    grep -hv '^#\|^$' /builder/image.packages
+    printf '%s\n' "$OMARCHY_RUNTIME_PACKAGE" "$OMARCHY_SETTINGS_PACKAGE" "$OMARCHY_NVIM_PACKAGE"
+  } | sed 's/^broadcom-wl$/broadcom-wl-dkms/' | sort -u
+)
+
 # With --local-source we already built these omarchy* packages directly into
 # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
 # the published versions on top.
 if [[ -n ${LOCAL_OMARCHY_BUILD:-} ]]; then
   mapfile -t all_packages < <(
     printf '%s\n' "${all_packages[@]}" |
+      grep -Fxv \
+        -e "$OMARCHY_RUNTIME_PACKAGE" \
+        -e "$OMARCHY_SETTINGS_PACKAGE" \
+        -e "$OMARCHY_NVIM_PACKAGE" || true
+  )
+  # They are in the image, so never shipped; and the online db the closure is
+  # resolved against does not know the local builds.
+  mapfile -t target_packages < <(
+    printf '%s\n' "${target_packages[@]}" |
       grep -Fxv \
         -e "$OMARCHY_RUNTIME_PACKAGE" \
         -e "$OMARCHY_SETTINGS_PACKAGE" \
@@ -285,6 +309,15 @@ for p in "${unresolved[@]}"; do
   fi
 done
 unresolved=("${still_unresolved[@]}")
+# The same renames and drops for the names an install can ask for.
+for p in "${!renamed_packages[@]}"; do
+  if [[ -f $renamed_list ]] && grep -q "^$p " "$renamed_list"; then
+    mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | sed "s/^${p}\$/${renamed_packages[$p]}/" | sort -u)
+  fi
+done
+if (( ${#unresolved[@]} )); then
+  mapfile -t target_packages < <(printf '%s\n' "${target_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${unresolved[@]}"))
+fi
 if (( ${#unresolved[@]} )); then
   echo "WARNING: dropping package names no configured repository offers: ${unresolved[*]}" >&2
   mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv -f <(printf '%s\n' "${unresolved[@]}"))
@@ -465,11 +498,24 @@ image_package_index() {
     awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n "\t" v }' "$desc"
   done
 }
+#
+# And of what the image lacks, only what an install can reach: the dependency
+# closure of the names it can ask for. The rest is the live system's own
+# tooling (about 180 packages, 125 MB), downloaded because
+# the live root is pacstrapped from this mirror and then left in it.
+if ! installable_files="$(
+  pacman --config "/configs/pacman-online-${OMARCHY_MIRROR}.conf" --noconfirm \
+    --dbpath /tmp/offlinedb -S --print --print-format '%f' "${target_packages[@]}"
+)"; then
+  echo "ERROR: could not resolve the packages an install can ask for" >&2
+  exit 1
+fi
 shipped_list="$build_cache_dir/airootfs/usr/share/omarchy-iso/offline-mirror.shipped"
 awk -F'\t' '
-  NR == FNR { image[$1 "\t" $2] = 1; next }
-  !(($1 "\t" $2) in image) { print $3 }
-' <(image_package_index) <(mirror_package_index) | sort -u >"$shipped_list"
+  FILENAME == ARGV[1] { installable[$1] = 1; next }
+  FILENAME == ARGV[2] { image[$1 "\t" $2] = 1; next }
+  !(($1 "\t" $2) in image) && ($3 in installable) { print $3 }
+' <(printf '%s\n' "$installable_files") <(image_package_index) <(mirror_package_index) | sort -u >"$shipped_list"
 # grep -c exits 1 on no match; the count check below wants the 0.
 shipped_count=$(grep -c . "$shipped_list" || true)
 mirror_count=$(mirror_package_index | wc -l)
