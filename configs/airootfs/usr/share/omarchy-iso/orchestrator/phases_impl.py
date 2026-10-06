@@ -1700,6 +1700,11 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
     # mounts (and their teardown) away from another chroot running on the same
     # target at the same time (finalize_boot_and_user).
     chroot_cmd = ["unshare", "-m", "--propagation", "private", "arch-chroot"] if private_mounts else ["arch-chroot"]
+    # snapper closes every fd up to RLIMIT_NOFILE in each of the four
+    # processes it forks during create-config. In a traced install that took
+    # 2.86 s; with the limit at 65536 the same command takes 0.04 s, at
+    # 524288 0.18 s. Nothing the finalizers run needs more than 65536.
+    chroot_cmd = ["prlimit", "--nofile=65536:65536", *chroot_cmd]
     if user:
         chroot_cmd += ["-u", user]
         env_extras.extend(_target_user_env(ctx, user))

@@ -68,11 +68,31 @@ def _lock(self: Luks2) -> None:
     _original_lock(self)
 
 
+def _chroot_argv(self, *args: str) -> list[str]:
+    """archinstall runs its chroot commands through `arch-chroot -S`, which
+    wraps each one in a transient systemd unit (systemd-run). Measured in a
+    traced install: useradd 0.77 s of which 0.6 s is useradd itself, a
+    chpasswd 0.15 s for 5 ms of work. The orchestrator's own chroots use
+    plain arch-chroot, and so do these."""
+    return ["arch-chroot", str(self.target), *args]
+
+
+def _run_command(self, cmd: str, peek_output: bool = False):
+    """The string-form twin of _chroot_argv (set_locale's locale-gen, the
+    timezone symlink, plymouth-set-default-theme) without the systemd-run
+    wrapper."""
+    from archinstall.lib.command import SysCommand
+    return SysCommand(f"arch-chroot {self.target} {cmd}", peek_output=peek_output)
+
+
 def apply() -> None:
     if os.environ.get("OMARCHY_LUKS_TUNING", "1") != "1":
         return
     Luks2.unlock = _unlock    # type: ignore[method-assign]
     Luks2.lock = _lock        # type: ignore[method-assign]
+    from archinstall.lib.installer import Installer
+    Installer._chroot_argv = _chroot_argv  # type: ignore[method-assign]
+    Installer.run_command = _run_command   # type: ignore[method-assign]
 
 
 def _luks_uuid_of(spec: str) -> str | None:
