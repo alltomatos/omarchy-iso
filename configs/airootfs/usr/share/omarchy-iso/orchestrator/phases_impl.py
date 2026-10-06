@@ -405,7 +405,12 @@ def arch_install_system(ctx: InstallContext) -> None:
     if not pre_mounted:
         info("› partitioning + formatting + encrypting")
         with _time_step("STEP.perform_filesystem_operations"):
-            arch.perform_filesystem_operations(config)
+            # The btrfs archinstall makes here is overwritten by the root
+            # image a moment later, so it need not TRIM the device first.
+            arch.perform_filesystem_operations(
+                config,
+                throwaway_root_fs=ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file(),
+            )
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
