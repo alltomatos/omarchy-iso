@@ -28,6 +28,7 @@ Phase ordering (full-disk and protected/pre-mounted):
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -639,12 +640,36 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
             # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
             # 64M slower (on the same drive, stream in RAM).
             # status=noxfer keeps dd's record counts for the check below.
-            proc = subprocess.run(
-                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=2M "
-                f"iflag=fullblock conv=sparse,fsync oflag=direct status=noxfer",
-                shell=True, check=True, stderr=subprocess.PIPE, text=True,
+            #
+            # The pipe is ours, not the shell's, for two reasons. Size: with
+            # the default 64 KiB pipe zstd stalls on every dd write and dd on
+            # every read; 4 MiB lets zstd stay two blocks ahead (2.5 s -> 2.1 s
+            # on a 990 PRO, stream in RAM; 1-16 MiB measure the same, 64 MiB
+            # and up slower). Above 1 MiB, F_SETPIPE_SZ needs
+            # CAP_SYS_RESOURCE, which the orchestrator has as root. Status:
+            # a shell pipeline reports dd's alone, so a zstd that died on a
+            # bad frame read as a short image written successfully.
+            read_end, write_end = os.pipe()
+            try:
+                fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
+            except OSError:
+                pass  # a smaller pipe is slower, not wrong
+            zstd = subprocess.Popen(["zstdcat", str(ROOT_IMAGE_RAW_ZST)], stdout=write_end)
+            dd = subprocess.Popen(
+                ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
+                 "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
+                stdin=read_end, stderr=subprocess.PIPE, text=True,
             )
-            _check_dd_full_blocks(proc.stderr)
+            os.close(read_end)
+            os.close(write_end)
+            _, dd_stderr = dd.communicate()
+            zstd.wait()
+            # dd first: when dd dies, zstd dies of the broken pipe after it.
+            if dd.returncode != 0:
+                raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
+            if zstd.returncode != 0:
+                raise subprocess.CalledProcessError(zstd.returncode, zstd.args)
+            _check_dd_full_blocks(dd_stderr)
     else:
         with _time_step("F1.dd (oflag=direct)"):
             subprocess.run(
