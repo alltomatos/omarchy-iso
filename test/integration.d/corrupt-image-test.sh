@@ -25,10 +25,8 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 # points OMARCHY_INTEGRATION_SCRATCH_DIR at its disk (the copy is read once
 # at boot and once by the hasher, so a ramdisk buys it nothing).
 CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
-# The root image's file name is resolved from the ISO, not assumed
-# (omarchy-root.img.zst for the block copy, omarchy-root.btrfs.zst for a
-# btrfs receive stream): with the wrong name the scenario silently tests
-# nothing.
+# The root image's file name, resolved from the ISO instead of assumed: with
+# a wrong hardcoded name this scenario would silently test nothing.
 STREAM=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
   tr -d "'" | sed 's|^/||' | head -n1)
 STREAM=${STREAM:-arch/x86_64/omarchy-root.img.zst}
