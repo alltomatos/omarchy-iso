@@ -557,6 +557,7 @@ install_progress() {
     "Staging provisioning")          lo=850 hi=855  tau=5   ;;
     "Finalizing Limine boot")     lo=855 hi=950  tau=90  ;;
     "Finalizing user")            lo=950 hi=978  tau=30  ;;
+    "Finalizing boot and user")   lo=855 hi=978  tau=90  ;;
     "Configuring login")          lo=978 hi=988  tau=5   ;;
     "Configuring DNS resolver")   lo=988 hi=994  tau=5   ;;
     "Validating boot setup")      lo=994 hi=998  tau=5   ;;

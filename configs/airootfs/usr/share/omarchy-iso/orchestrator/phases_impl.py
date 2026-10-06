@@ -558,6 +558,29 @@ def _root_image_target_mounts(target: Path) -> tuple[list[dict], str]:
     return mounts, device
 
 
+def _wait_for_blkid_uuid(device: str, attempts: int = 50) -> None:
+    """Re-probe `device` until blkid's UUID matches the btrfs superblock fsid."""
+    want = ""
+    dump = subprocess.run(["btrfs", "inspect-internal", "dump-super", device],
+                          capture_output=True, text=True, check=False).stdout
+    for line in dump.splitlines():
+        if line.startswith("fsid"):
+            want = line.split()[-1]
+            break
+    for _ in range(attempts):
+        subprocess.run(["udevadm", "trigger", "--settle", "--action=change", device],
+                       check=False, capture_output=True)
+        got = subprocess.run(["blkid", "-p", "-s", "UUID", "-o", "value", device],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        cached = subprocess.run(["blkid", "-s", "UUID", "-o", "value", device],
+                                capture_output=True, text=True, check=False).stdout.strip()
+        if want and got == want and cached == want:
+            info(f"› fsid {want} visible to blkid")
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"blkid still reports an old UUID for {device} after the fsid change (want {want})")
+
+
 def _install_root_image_dd(ctx: InstallContext) -> None:
     """Write the pre-built btrfs image straight onto the target partition, then
     give the filesystem a new fsid. Same result as the btrfs receive path, the
@@ -591,8 +614,21 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
                 check=True,
             )
 
-    with _time_step("F1.btrfstune -u"):
-        subprocess.run(["btrfstune", "-f", "-u", device], check=True)
+    # -m sets a fresh fsid via the METADATA_UUID feature (kernel 5.0+) by
+    # writing the superblocks only; -u rewrites every metadata block of the
+    # 4.5 GB image, which takes 0.8-2.0 s. The visible UUID (blkid, fstab,
+    # snapper) is the new one either way; two installs from the same image
+    # are distinct filesystems to the kernel because they differ in fsid.
+    with _time_step("F1.btrfstune -m (new fsid via metadata_uuid)"):
+        subprocess.run(["btrfstune", "-f", "-m", device], check=True)
+    # genfstab and the Limine cmdline read the UUID through libblkid, whose
+    # cache only refreshes once udev has re-probed the device. On a slow
+    # machine genfstab can run first and record the image's old fsid, and the
+    # installed system then waits forever for /dev/disk/by-uuid/<old>. Force
+    # the re-probe and do not continue until blkid reports what the
+    # superblock says.
+    with _time_step("F1.udev_reprobe_after_fsid_change"):
+        _wait_for_blkid_uuid(device)
 
     # Give the filesystem the layout archinstall's fstab expects. The write
     # replaced the empty @, @home, @log and @pkg subvolumes archinstall had
@@ -1621,7 +1657,8 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
     ]
 
 
-def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None) -> None:
+def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None,
+                              private_mounts: bool = False) -> None:
     _prepare_target_setup(ctx)
     omarchy_start_time, omarchy_start_epoch = _ensure_finalizer_log_started(ctx)
 
@@ -1659,7 +1696,10 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
         env_extras.append("OMARCHY_INSTALL_DEBUG=1")
         _debug_log(ctx, "running target setup command: " + " ".join(cmd))
 
-    chroot_cmd = ["arch-chroot"]
+    # A private mount namespace keeps this arch-chroot's /proc, /sys and /dev
+    # mounts (and their teardown) away from another chroot running on the same
+    # target at the same time (finalize_boot_and_user).
+    chroot_cmd = ["unshare", "-m", "--propagation", "private", "arch-chroot"] if private_mounts else ["arch-chroot"]
     if user:
         chroot_cmd += ["-u", user]
         env_extras.extend(_target_user_env(ctx, user))
@@ -1985,7 +2025,7 @@ def _limine_kernel_cmdline(config_text: str) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
-def run_chroot_finalizer(ctx: InstallContext) -> None:
+def run_chroot_finalizer(ctx: InstallContext, *, private_mounts: bool = False) -> None:
     if ctx.defer_provisioning:
         info("› deferred-provisioning install: user finalization deferred to first boot")
         return
@@ -1994,7 +2034,36 @@ def run_chroot_finalizer(ctx: InstallContext) -> None:
         ctx,
         ["/usr/bin/omarchy-provision-user", "--force", "--first-install"],
         user=ctx.username,
+        private_mounts=private_mounts,
     )
+
+
+def finalize_boot_and_user(ctx: InstallContext) -> None:
+    """finalize_limine_boot and run_chroot_finalizer at the same time. The
+    first writes the ESP and the boot entry (limine-install, the pre-built
+    UKI copy, limine-entry-tool); the second runs as the user in the home
+    directory (theme, mise, xdg defaults) and only reads the system. Measured
+    on their own: 0.8 s and 1.9 s; together they take the longer of the two.
+    The user finalizer's chroot runs in a private mount namespace so the two
+    arch-chroots do not tear down each other's /proc, /sys and /dev."""
+    if ctx.defer_provisioning or os.environ.get("OMARCHY_SERIAL_FINALIZE") == "1":
+        finalize_limine_boot(ctx)
+        run_chroot_finalizer(ctx)
+        return
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        boot = pool.submit(finalize_limine_boot, ctx)
+        user = pool.submit(run_chroot_finalizer, ctx, private_mounts=True)
+        errors: list[BaseException] = []
+        for future in (boot, user):
+            try:
+                future.result()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                errors.append(exc)
+    if errors:
+        raise errors[0]
 
 
 def configure_dns_resolver(ctx: InstallContext) -> None:

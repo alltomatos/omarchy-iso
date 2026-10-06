@@ -186,49 +186,63 @@ def install_base_delta(
     if disk_config.lvm_config:
         raise RuntimeError("root image install does not support LVM layouts")
 
-    for mod in disk_config.device_modifications:
-        for part in mod.partitions:
-            if part.fs_type is None:
-                continue
-            installer._prepare_fs_type(part.fs_type, part.mountpoint)
-            if part in installer._disk_encryption.partitions:
-                installer._prepare_encrypt()
+    # Each framework call below has its own [step] timer: the function takes
+    # 0.8 s with no package to install, and the timers show where.
+    from .phases_impl import _time_step
 
-    if ucode := installer._get_microcode():
-        (installer.target / "boot" / ucode).unlink(missing_ok=True)
-        installer._base_packages.append(ucode.stem)
+    with _time_step("DELTA.prepare_fs_and_encrypt"):
+        for mod in disk_config.device_modifications:
+            for part in mod.partitions:
+                if part.fs_type is None:
+                    continue
+                installer._prepare_fs_type(part.fs_type, part.mountpoint)
+                if part in installer._disk_encryption.partitions:
+                    installer._prepare_encrypt()
 
-    mirror_config = arch_config.mirror_config
-    pacman_conf = PacmanConfig(installer.target)
-    pacman_conf.enable(mirror_config.optional_repositories if mirror_config else [])
-    pacman_conf.apply()
+    with _time_step("DELTA.microcode"):
+        if ucode := installer._get_microcode():
+            (installer.target / "boot" / ucode).unlink(missing_ok=True)
+            installer._base_packages.append(ucode.stem)
 
-    if locale_config:
-        installer.set_vconsole(locale_config)
+    with _time_step("DELTA.pacman_conf"):
+        mirror_config = arch_config.mirror_config
+        pacman_conf = PacmanConfig(installer.target)
+        pacman_conf.enable(mirror_config.optional_repositories if mirror_config else [])
+        pacman_conf.apply()
 
-    delta = [pkg for pkg in installer._base_packages if not target_has_package(installer.target, pkg)]
-    if delta:
-        installer.pacman.strap(delta)
-    installer._helper_flags["base-strapped"] = True
+    with _time_step("DELTA.vconsole"):
+        if locale_config:
+            installer.set_vconsole(locale_config)
 
-    pacman_conf.persist()
-    if arch_config.pacman_config:
-        pacman_conf.configure(arch_config.pacman_config)
+    with _time_step("DELTA.package_delta"):
+        delta = [pkg for pkg in installer._base_packages if not target_has_package(installer.target, pkg)]
+        if delta:
+            installer.pacman.strap(delta)
+        installer._helper_flags["base-strapped"] = True
 
-    if not installer._disable_fstrim:
-        installer.enable_periodic_trim()
+    with _time_step("DELTA.pacman_conf_persist"):
+        pacman_conf.persist()
+        if arch_config.pacman_config:
+            pacman_conf.configure(arch_config.pacman_config)
 
-    if hostname:
-        installer.set_hostname(hostname)
+    with _time_step("DELTA.fstrim"):
+        if not installer._disable_fstrim:
+            installer.enable_periodic_trim()
 
-    if locale_config:
-        installer.set_locale(locale_config)
-        installer.set_keyboard_language(locale_config.kb_layout)
+    with _time_step("DELTA.hostname"):
+        if hostname:
+            installer.set_hostname(hostname)
+
+    with _time_step("DELTA.locale_and_keyboard"):
+        if locale_config:
+            installer.set_locale(locale_config)
+            installer.set_keyboard_language(locale_config.kb_layout)
 
     installer._helper_flags["base"] = True
 
-    for function in installer.post_base_install:
-        function(installer)
+    with _time_step("DELTA.post_base_install"):
+        for function in installer.post_base_install:
+            function(installer)
 
 
 def setup_zram_swap(installer: Installer) -> None:
