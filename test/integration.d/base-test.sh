@@ -803,6 +803,19 @@ install_phase() {
   ssh_guest "timeout 120 systemctl is-system-running --wait >/dev/null; systemd-analyze" \
     >"$BASE_DIR/first-boot-systemd-analyze.txt" 2>/dev/null || true
 
+  # This is the only first boot the harness ever sees, so it is where the
+  # first-boot cost gets recorded: systemd's own timing, and whether the
+  # ConditionNeedsUpdate= units ran. The installer marks updates as applied
+  # after its last pacman transaction, so they must all have been skipped;
+  # a "yes" here is 1-2 s of repeated work on every fresh install.
+  ssh_sudo "systemd-analyze; systemd-analyze blame | head -n 15" >"$BASE_DIR/first-boot-analyze.txt" 2>/dev/null || true
+  ssh_sudo "systemctl show ldconfig.service systemd-hwdb-update.service systemd-journal-catalog-update.service systemd-sysusers.service -p Id -p ConditionResult" \
+    >"$BASE_DIR/first-boot-update-units.txt" 2>/dev/null || true
+  if grep -q '^ConditionResult=yes' "$BASE_DIR/first-boot-update-units.txt" 2>/dev/null; then
+    echo "First boot ran the ConditionNeedsUpdate= units (see $BASE_DIR/first-boot-update-units.txt)" >&2
+    return 1
+  fi
+
   log "Installed system is up. Saving base image."
   stop_vm
   mv "$BASE_DISK.building" "$BASE_DISK"

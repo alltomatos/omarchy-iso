@@ -2558,9 +2558,38 @@ def _validate_pre_mounted_filesystems(ctx: InstallContext) -> None:
 # true factory reset.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _mark_updates_applied(ctx: InstallContext) -> None:
+    """Disarm ConditionNeedsUpdate= for the first boot.
+
+    Arch's 35-systemd-update pacman hook touches /usr after every
+    transaction, which arms ldconfig.service, systemd-hwdb-update,
+    systemd-journal-catalog-update and systemd-sysusers for the next boot.
+    pacman has already done all four at transaction time (it runs ldconfig
+    itself, and the 20-/25-systemd-* hooks run sysusers, hwdb and the
+    catalog), so on the first boot they only repeat the work: on a
+    hardware install "Rebuild Dynamic Linker Cache" alone was 1.32 s of a
+    4.54 s userspace. systemd-update-done records /usr's timestamp in
+    /etc/.updated and /var/.updated, which is exactly what those units'
+    condition compares against. It has to run after the last transaction
+    (the per-machine packages re-arm it) and before the factory snapshot,
+    so a factory reset boots as fast as the install did."""
+    done = ctx.target / "usr" / "lib" / "systemd" / "systemd-update-done"
+    if not done.is_file():
+        return
+    with _time_step("FINAL.systemd-update-done (disarm first-boot update units)"):
+        result = subprocess.run(
+            ["arch-chroot", str(ctx.target), "/usr/lib/systemd/systemd-update-done"],
+            check=False, capture_output=True, text=True,
+        )
+    if result.returncode != 0:
+        # Cosmetic for the install: the first boot just runs the units.
+        info(f"› systemd-update-done failed ({result.returncode}); first boot will run the update units")
+
+
 def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
+    _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")
     if fstype != "btrfs":
