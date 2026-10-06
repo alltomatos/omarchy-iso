@@ -2067,7 +2067,14 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
         default_limine.write_text(f'{text}\nBOOT_ORDER="{selected}, {selected}-*, *, *fallback, Snapshots"\n')
         info(f"› {selected} boots first; the pre-built UKI is for {prebuilt_kernel}")
 
-    if prebuilt_uki.is_file() and not added_modules:
+    # A UKI is a UEFI executable. On BIOS firmware Limine boots a kernel and
+    # initramfs pair, and limine-entry-tool --add-uki refuses ("Your system is
+    # not using EFI mode"), so such a machine builds its boot files the normal
+    # way below.
+    if prebuilt_uki.is_file() and not added_modules and not arch.has_uefi():
+        info("› BIOS firmware; the pre-built UKI is UEFI-only, building the boot files on this machine")
+
+    if prebuilt_uki.is_file() and not added_modules and arch.has_uefi():
         used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
