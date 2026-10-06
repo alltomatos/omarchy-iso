@@ -65,6 +65,11 @@ KEYBOARD_LABEL="English (US)"
 # libvfio-user's gpio-pci-idio-16 sample); see test/fake-pci.md.
 FAKE_PCI=()
 FAKE_PCI_PIDS=()
+# --smbios TYPE-1-FIELDS (repeatable, QEMU syntax, a literal comma is ",,"):
+# the DMI identity omarchy's hardware scripts match on, e.g.
+#   --smbios "manufacturer=Framework,product=Laptop 16 (AMD Ryzen 7040 Series)"
+#   --smbios "manufacturer=ASUSTeK COMPUTER INC.,family=ROG Flow Z13"
+SMBIOS=()
 
 GUEST_USER="omarchy"
 GUEST_PASSWORD="omarchy"
@@ -86,6 +91,7 @@ while (($#)); do
     --memory) MEMORY="$2"; shift ;;
     --timeout) INSTALL_TIMEOUT="$2"; shift ;;
     --fake-pci) FAKE_PCI+=("$2"); shift ;;
+    --smbios) SMBIOS+=("$2"); shift ;;
     -*) echo "Unknown option: $1" >&2; exit 1 ;;
     *) ISO="$1" ;;
   esac
@@ -254,6 +260,10 @@ start_vm() {
     fake_args+=(-device "{\"driver\":\"vfio-user-pci\",\"socket\":{\"path\":\"$sock\",\"type\":\"unix\"},\"x-pci-vendor-id\":$((16#$vendor)),\"x-pci-device-id\":$((16#$device)),\"x-pci-class-code\":$((16#$class))}")
     index=$((index + 1))
   done
+  for spec in "${SMBIOS[@]}"; do
+    fake_args+=(-smbios "type=1,$spec")
+  done
+  ((${#SMBIOS[@]})) && log "Fake DMI identity: ${SMBIOS[*]}"
   if ((${#FAKE_PCI[@]})); then
     fake_args+=(-object "memory-backend-memfd,id=fakepcimem,size=${MEMORY}M,share=on" -numa node,memdev=fakepcimem)
     log "Fake PCI hardware: ${FAKE_PCI[*]}"
