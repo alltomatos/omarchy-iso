@@ -1202,6 +1202,19 @@ def _write_limine_defaults(
     # pre-mounted alike), so this is where the console parameter goes.
     if CONSOLE_NO_ANSI_QUERY not in cmdline.split():
         cmdline = f"{cmdline} {CONSOLE_NO_ANSI_QUERY}"
+    # And the sd-encrypt spelling of cryptdevice=. Added on the
+    # archinstall-derived path only, it would leave an encrypted install into
+    # free space (the pre-mounted path) with an entry the pre-built UKI cannot
+    # unlock: no rd.luks.name=, no cryptsetup job, no passphrase prompt, and
+    # "A start job is running for /dev/mapper/omarchy_root" with no limit.
+    # No VM scenario installs into free space.
+    from .luks_tuning import with_cmdline_options
+    cmdline = with_cmdline_options(cmdline)
+    if "cryptdevice=" in cmdline and "rd.luks.name=" not in cmdline:
+        raise RuntimeError(
+            f"encrypted cmdline has cryptdevice= but no rd.luks.name=; the "
+            f"pre-built UKI could not unlock the root: {cmdline!r}"
+        )
 
     default_text = _limine_template(ctx, "default.conf").read_text()
     default_text = default_text.replace("@@CMDLINE@@", cmdline)

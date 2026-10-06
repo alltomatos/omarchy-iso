@@ -118,18 +118,26 @@ def apply() -> None:
 
 def _luks_uuid_of(spec: str) -> str | None:
     """LUKS header UUID of the device a cryptdevice= spec names
-    (UUID=, PARTUUID=, or a path)."""
+    (UUID=, PARTUUID=, or a path).
+
+    For a UUID= spec the value is the header UUID by definition (that is
+    what /dev/disk/by-uuid holds for a LUKS partition), so it is the
+    fallback whenever the link is not there yet or blkid has nothing to say:
+    a lookup hiccup must never silently drop the unlock parameters."""
+    fallback = None
     if "=" in spec:
         tag, _, value = spec.partition("=")
         dev = Path("/dev/disk") / f"by-{tag.lower()}" / value
+        if tag.upper() == "UUID":
+            fallback = value
     else:
         dev = Path(spec)
     if not dev.exists():
-        return None
+        return fallback
     try:
-        return run(["blkid", "-s", "UUID", "-o", "value", str(dev)]).stdout.decode().strip() or None
+        return run(["blkid", "-s", "UUID", "-o", "value", str(dev)]).stdout.decode().strip() or fallback
     except CalledProcessError:
-        return None
+        return fallback
 
 
 def with_cmdline_options(cmdline: str) -> str:
@@ -153,7 +161,9 @@ def with_cmdline_options(cmdline: str) -> str:
             spec, _, rest = param[len("cryptdevice="):].partition(":")
             name = rest.split(":")[0] or "root"
             uuid = _luks_uuid_of(spec)
-            if uuid:
+            # Idempotent: every cmdline passes through here once at the
+            # writer, and the archinstall-derived one has been here before.
+            if uuid and f"rd.luks.name={uuid}=" not in cmdline:
                 extra += [f"rd.luks.name={uuid}={name}",
                           f"rd.luks.options={uuid}={CMDLINE_OPTIONS.replace('allow-discards', 'discard')}"]
         out.append(param)
