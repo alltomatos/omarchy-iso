@@ -665,7 +665,10 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
             fcntl.fcntl(write_end, fcntl.F_SETPIPE_SZ, 4 << 20)
         except OSError:
             pass  # a smaller pipe is slower, not wrong
-        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end)
+        # zstd's stderr is captured so its reason ("premature end", a bad
+        # frame) travels with the failure; it only writes there on an error.
+        zstd = subprocess.Popen(["zstdcat", str(image)], stdout=write_end,
+                                stderr=subprocess.PIPE, text=True)
         dd = subprocess.Popen(
             ["dd", f"of={device}", "bs=2M", "iflag=fullblock",
              "conv=sparse,fsync", "oflag=direct", "status=noxfer"],
@@ -674,12 +677,12 @@ def _write_root_image_pipe(image: Path, device: str) -> None:
         os.close(read_end)
         os.close(write_end)
         _, dd_stderr = dd.communicate()
-        zstd.wait()
+        _, zstd_stderr = zstd.communicate()
         # dd first: when dd dies, zstd dies of the broken pipe after it.
         if dd.returncode != 0:
             raise subprocess.CalledProcessError(dd.returncode, dd.args, stderr=dd_stderr)
         if zstd.returncode != 0:
-            raise subprocess.CalledProcessError(zstd.returncode, zstd.args)
+            raise subprocess.CalledProcessError(zstd.returncode, zstd.args, stderr=zstd_stderr)
         _check_dd_full_blocks(dd_stderr)
 
 
