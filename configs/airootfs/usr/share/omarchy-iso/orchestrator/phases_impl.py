@@ -1163,7 +1163,19 @@ def _register_limine_efi_entry(
     pre_state: dict | None = None,
 ) -> None:
     pre_state = pre_state or _read_efibootmgr()
-    stale_limine = _find_label_entries(pre_state["entries"], "Limine")
+    # Replace only this ESP's own entry. Other "Limine" entries belong to other
+    # installs, such as the Omarchy a free-space install is put next to;
+    # deleting every "Limine" entry would leave those installs with none.
+    # efibootmgr prints each entry's device path, HD(part,GPT,<guid>,...), so
+    # this ESP's entries are the ones naming its partition GUID. An efibootmgr
+    # that prints no paths matches nothing, and a reinstall onto the same ESP
+    # then leaves one duplicate behind, which is harmless.
+    esp = _partition_guid(disk, part)
+    stale_limine = [
+        num
+        for num in _find_label_entries(pre_state["entries"], "Limine")
+        if esp and esp in pre_state["entries"][num].lower()
+    ]
     for num in stale_limine:
         subprocess.run(
             ["efibootmgr", "--bootnum", num, "--delete-bootnum"],
@@ -1184,8 +1196,15 @@ def _register_limine_efi_entry(
         check=True,
     )
 
+    # The entry just created: a "Limine" entry that was not there before, or
+    # that reuses the number of one deleted above. The first "Limine" entry in
+    # the list may be another install's.
     post_state = _read_efibootmgr()
-    new_limine = _find_label_entries(post_state["entries"], "Limine")
+    new_limine = [
+        num
+        for num in _find_label_entries(post_state["entries"], "Limine")
+        if num not in pre_state["entries"] or num in stale_limine
+    ]
     if not new_limine:
         raise RuntimeError("efibootmgr --create reported success but no Limine entry found")
     limine_num = new_limine[0]
@@ -1639,6 +1658,17 @@ def _read_efibootmgr() -> dict:
 
 def _find_label_entries(entries: dict[str, str], needle: str) -> list[str]:
     return [num for num, label in entries.items() if needle.lower() in label.lower()]
+
+
+def _partition_guid(disk: Path, part: int) -> str:
+    """The GPT partition GUID of partition `part` on `disk`, lower case, as
+    efibootmgr prints it in a boot entry's device path; "" if unknown."""
+    res = capture(["lsblk", "-nlo", "PARTN,PARTUUID", str(disk)])
+    for line in res.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == str(part):
+            return fields[1].lower()
+    return ""
 
 
 def _split_partition_device(part_dev: str) -> tuple[str, int]:
