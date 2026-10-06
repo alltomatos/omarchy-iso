@@ -206,7 +206,7 @@ start_vm() {
     -smp "$(nproc)" \
     -m "$MEMORY" \
     "${firmware_args[@]}" \
-    -drive file="$disk",format=qcow2,if=none,id=drive0${DISK_CACHE:+,cache=$DISK_CACHE} \
+    -drive "file=$disk,format=qcow2,if=none,id=drive0${DISK_CACHE:+,cache=$DISK_CACHE}${OMARCHY_DISK_DRIVE_OPTS:+,$OMARCHY_DISK_DRIVE_OPTS}" \
     -device virtio-blk-pci,drive=drive0,bootindex=1 \
     -device virtio-vga \
     -display none \
@@ -761,7 +761,7 @@ install_phase() {
   # not boot the isohybrid image off a fallback USB device here, so USB is not
   # worth the flakiness. The copytoram-off / USB path is covered by unit tests.
   start_vm "$BASE_DISK.building" "$RUN_DIR/install-serial.log" \
-    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0" \
+    -drive "file=$ISO,media=cdrom,if=none,format=raw,id=cdrom0${OMARCHY_ISO_THROTTLE_BPS:+,throttling.bps-read=$OMARCHY_ISO_THROTTLE_BPS}" \
     -device ide-cd,drive=cdrom0,bootindex=2 \
     -drive "file=$CIDATA_IMG,format=raw,if=none,id=cidata" \
     -device usb-storage,drive=cidata
