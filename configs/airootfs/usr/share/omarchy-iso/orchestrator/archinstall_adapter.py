@@ -38,6 +38,7 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,10 +58,43 @@ from archinstall.lib.models.device import DiskLayoutType, EncryptionType
 from archinstall.lib.pacman.config import PacmanConfig
 from archinstall.lib.models.users import User
 
-from . import luks_tuning
-luks_tuning.apply()
-
 from .ui import info
+
+# The archinstall this adapter is written and tested against. luks_tuning and
+# _filesystem_step_tweaks replace archinstall internals (Luks2's methods, the
+# device handler's), and install_base_delta calls private Installer methods;
+# none of that is a stable API. The ISO pins archinstall in its offline
+# mirror, so another version means the ISO build picked up a new release:
+# stop at startup and say so, before a replaced internal misbehaves in the
+# middle of an install. OMARCHY_ARCHINSTALL_UNTESTED=1 runs anyway, which is
+# how a new release gets tried.
+TESTED_ARCHINSTALL = "4.4"
+
+
+def check_archinstall_version(version: str | None = None) -> None:
+    if version is None:
+        from importlib.metadata import PackageNotFoundError, version as package_version
+        try:
+            version = package_version("archinstall")
+        except PackageNotFoundError:
+            version = "unknown"
+    if version.split(".")[:2] == TESTED_ARCHINSTALL.split(".")[:2]:
+        return
+    message = (
+        f"archinstall {version} is installed, but this installer is tested against "
+        f"archinstall {TESTED_ARCHINSTALL}: it replaces archinstall internals that "
+        f"change between releases (orchestrator/archinstall_adapter.py)"
+    )
+    if os.environ.get("OMARCHY_ARCHINSTALL_UNTESTED") == "1":
+        info(f"› {message}; running anyway (OMARCHY_ARCHINSTALL_UNTESTED=1)")
+        return
+    raise RuntimeError(f"{message}. Set OMARCHY_ARCHINSTALL_UNTESTED=1 to try it anyway.")
+
+
+check_archinstall_version()
+
+from . import luks_tuning  # noqa: E402 - patches archinstall only after the check
+luks_tuning.apply()
 
 
 def load_arch_config(config_path: Path, creds_path: Path) -> ArchConfigHandler:
