@@ -34,9 +34,21 @@ FIRMWARE="${OMARCHY_INTEGRATION_FIRMWARE:-uefi}"
 OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_TEMPLATE="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
+# Variant knobs. One ISO can be installed several different ways, and each
+# way is a configuration users actually run; keeping them here means a variant
+# costs an install, not a second image. Each variant keeps its own base image
+# so the scenarios that boot an overlay stay independent.
+VARIANT="${OMARCHY_INTEGRATION_VARIANT:-default}"
+DISK_GB="${OMARCHY_INTEGRATION_DISK_GB:-40}"
+UKI="${OMARCHY_INTEGRATION_UKI:-false}"
+ENCRYPT="${OMARCHY_INTEGRATION_ENCRYPT:-false}"
+
 BASE_DIR="$ROOT/test-runs/$(basename "$ISO" .iso)-integration"
 if [[ $FIRMWARE == bios ]]; then
   BASE_DIR+="-bios"
+fi
+if [[ $VARIANT != default ]]; then
+  BASE_DIR="$BASE_DIR-$VARIANT"
 fi
 RUN_DIR="$BASE_DIR/runs/$(date +%Y%m%d-%H%M%S)-$SCENARIO"
 BASE_DISK="$BASE_DIR/base.qcow2"
@@ -317,12 +329,22 @@ ssh_sudo() {
 # sleeps let a "300 s" wait run for ten minutes or more, silently.
 wait_for_ssh() {
   local timeout="$1" failure_name="${2:-failure-ssh-timeout}"
-  local started=$SECONDS next_note=30 progress_name
+  local started=$SECONDS next_note=30 next_unlock=0 progress_name
 
   while ! ssh_guest true 2>/dev/null; do
     if ! vm_running; then
       echo "VM exited while waiting for SSH" >&2
       return 1
+    fi
+
+    # Every boot of an encrypted install stops in the initramfs asking for the
+    # passphrase, scenario overlays included.
+    if [[ ${ENCRYPT:-false} == true ]] && ((SECONDS - started >= next_unlock)); then
+      ((next_unlock += 15))
+      if ocr_screen | grep -qi "password is required"; then
+        type_text "$GUEST_PASSWORD"
+        press ret
+      fi
     fi
 
     if ((SECONDS - started >= timeout)); then
@@ -482,8 +504,8 @@ EOF
 # VM boots from. Sizing mirrors the configurator: 1MiB gap, 2GiB ESP, the rest
 # btrfs minus the GPT backup reserve.
 build_cidata() {
-  local dir="$BASE_DIR/cidata" hash
-  local disk_bytes=$((40 * 1024 * 1024 * 1024))
+  local dir="$BASE_DIR/cidata" hash encryption_config="" credentials_encryption=""
+  local disk_bytes=$((DISK_GB * 1024 * 1024 * 1024))
   local mib=$((1024 * 1024)) gib=$((1024 * 1024 * 1024))
   local boot_start=$mib boot_size=$((2 * gib))
   local main_start=$((boot_size + boot_start))
@@ -494,8 +516,30 @@ build_cidata() {
 
   hash=$(openssl passwd -6 "$GUEST_PASSWORD")
 
+  # The obj_id is the main partition's, as written below: archinstall encrypts
+  # partitions by identity, not by path. The passphrase also has to be in the
+  # credentials, exactly where the configurator puts it: archinstall reads the
+  # encryption password from there, and a disk_encryption block without one
+  # installs unencrypted while the orchestrator still believes it is encrypted.
+  if [[ $ENCRYPT == true ]]; then
+    credentials_encryption="    \"encryption_password\": $(jq -Rn --arg v "$GUEST_PASSWORD" '$v'),"
+    encryption_config=$(
+      cat <<EOF
+,
+        "disk_encryption": {
+            "encryption_type": "luks",
+            "lvm_volumes": [],
+            "iter_time": 2000,
+            "partitions": [ "8c2c2b92-1070-455d-b76a-56263bab24aa" ],
+            "encryption_password": $(jq -Rn --arg v "$GUEST_PASSWORD" '$v')
+        }
+EOF
+    )
+  fi
+
   cat >"$dir/user_credentials.json" <<EOF
 {
+$credentials_encryption
     "root_enc_password": $(jq -Rn --arg v "$hash" '$v'),
     "users": [
         {
@@ -514,7 +558,7 @@ EOF
     "archinstall-language": "English",
     "auth_config": {},
     "audio_config": { "audio": "pipewire" },
-    "bootloader_config": { "bootloader": "Limine", "uki": false, "removable": false },
+    "bootloader_config": { "bootloader": "Limine", "uki": $UKI, "removable": false },
     "custom_commands": [],
     "omarchy_install": {
         "mode": "full_disk",
@@ -568,7 +612,7 @@ EOF
                 ],
                 "wipe": true
             }
-        ]
+        ]$encryption_config
     },
     "hostname": "$GUEST_HOSTNAME",
     "kernels": [ "linux-omarchy" ],
@@ -604,7 +648,7 @@ EOF
 
   echo "Omarchy Test" >"$dir/user_full_name.txt"
   echo "test@omarchy.org" >"$dir/user_email_address.txt"
-  echo "false" >"$dir/user_encrypt_installation.txt"
+  echo "$ENCRYPT" >"$dir/user_encrypt_installation.txt"
   cp "$SSH_KEY.pub" "$dir/authorized_keys"
 
   rm -f "$CIDATA_IMG"
@@ -643,6 +687,19 @@ wait_for_unattended_install() {
     fi
 
     text=$(ocr_screen)
+
+    # An encrypted install reboots into a passphrase prompt, which nothing
+    # else in an unattended run is there to answer. The wording is the
+    # initramfs encrypt hook's: "A password is required to access the root
+    # volume:".
+    if [[ $ENCRYPT == true ]] &&
+      grep -qiE "password is required|enter passphrase|unlocking" <<<"$text"; then
+      capture_console "success-install-luks-prompt"
+      type_text "$GUEST_PASSWORD"
+      press ret
+      sleep 10
+      continue
+    fi
 
     if grep -qi "Reboot Now" <<<"$text"; then
       log "Install finished. Confirming the reboot prompt."
@@ -692,7 +749,7 @@ install_phase() {
   # Build under a staging name: the finished base is promoted only after a
   # clean shutdown, so a failed install can never pass for a reusable base.
   rm -f "$BASE_DISK" "$BASE_DISK.building"
-  qemu-img create -f qcow2 "$BASE_DISK.building" 40G >/dev/null
+  qemu-img create -f qcow2 "$BASE_DISK.building" "${DISK_GB}G" >/dev/null
   if [[ $FIRMWARE == uefi ]]; then
     cp "$OVMF_VARS_TEMPLATE" "$BASE_OVMF"
     ACTIVE_OVMF="$BASE_OVMF"
