@@ -117,8 +117,12 @@ class KernelSelectionTest(unittest.TestCase):
                         target=Path("/unused"), tailscale_authkey_path=None, defer_provisioning=False,
                         omarchy_install={},
                     )
+                    # _start_target_keyring_init starts a real systemd-run unit
+                    # on whatever machine runs the tests, left running
+                    # unjoined (ResourceWarning: subprocess is still running).
                     for name in ("_mount_offline_package_cache", "_mask_mkinitcpio_pacman_hooks",
-                                 "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image"):
+                                 "_configure_limine_boot", "_write_pre_mounted_fstab", "_install_root_image",
+                                 "_start_target_keyring_init"):
                         stack.enter_context(mock.patch.object(phases_impl, name))
                     unmask = stack.enter_context(mock.patch.object(phases_impl, "_unmask_mkinitcpio_pacman_hooks"))
                     unmount = stack.enter_context(mock.patch.object(phases_impl, "_unmount_offline_package_cache"))
@@ -181,6 +185,9 @@ class KernelSelectionTest(unittest.TestCase):
                     "etc/kernel/cmdline": "root=UUID=test\n",
                     "etc/default/limine": "CUSTOM_UKI_NAME=omarchy\n",
                     "boot/EFI/limine/limine_x64.efi": "bootloader",
+                    # A full-disk install deploys the fallback loader too;
+                    # without it validate_boot warns that none is there.
+                    "boot/EFI/BOOT/BOOTX64.EFI": "bootloader",
                     f"boot/EFI/Linux/omarchy_{expected}.efi": "UKI",
                 }
                 for name, content in files.items():
