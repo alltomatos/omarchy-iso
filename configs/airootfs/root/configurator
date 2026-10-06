@@ -733,12 +733,16 @@ run_partition_execute() {
       # Kept as pipes rather than routed through disk_step: the passphrase must
       # not become an argv the process table can show. Folding stderr into
       # stdout still lands any error in the install log.
+      # The same persistent open flags as orchestrator/luks_tuning.py: the
+      # free-space path formats and opens here, before the orchestrator runs,
+      # so that tuning does not reach it.
       if ! printf "%s" "$password" |
         cryptsetup luksFormat --type luks2 --batch-mode "$root_partition_device" - 2>&1; then
         disk_abort_hook "Formatting LUKS2 on $root_partition_device failed"
       fi
       if ! printf "%s" "$password" |
-        cryptsetup open "$root_partition_device" omarchy_root - 2>&1; then
+        cryptsetup open --persistent --allow-discards --perf-no_read_workqueue \
+          "$root_partition_device" omarchy_root - 2>&1; then
         disk_abort_hook "Opening the encrypted root on $root_partition_device failed"
       fi
       root_mapper="/dev/mapper/omarchy_root"
