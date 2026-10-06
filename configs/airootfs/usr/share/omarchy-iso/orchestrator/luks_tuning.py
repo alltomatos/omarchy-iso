@@ -1,0 +1,119 @@
+"""LUKS open tuning for the unattended install, applied to archinstall's
+Luks2 before any encryption happens.
+
+The volume is opened once, at install time, with --allow-discards and
+--perf-no_read_workqueue, stored persistently in the header, and stays open
+for the whole install instead of archinstall's three open/close cycles:
+each open is a full key derivation (2.2 s on a 12600K at the configurator's
+iter-time). The cmdline (see phases_impl) spells the same options for both
+initramfs flavours.
+
+The format itself is archinstall's: argon2id at the configurator's
+iter-time, benchmarked on the machine.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from subprocess import CalledProcessError
+
+from archinstall.lib.command import run
+from archinstall.lib.disk.luks import Luks2
+from archinstall.lib.exceptions import DiskError
+from archinstall.lib.log import debug
+
+# --persistent writes the flags into the LUKS2 header, so every later open
+# (busybox encrypt hook, sd-encrypt, systemd-gpt-auto) applies them without
+# needing them on the kernel cmdline. no_write_workqueue is deliberately not
+# here: in the install VM the image write onto the virtio disk takes
+# 6.7-7.5 s with it and 5.0 s without, although a plain dd of zeros is
+# faster with it (2.3 s against 3.4 s).
+OPEN_FLAGS = ["--persistent", "--allow-discards", "--perf-no_read_workqueue"]
+# The same options as the busybox encrypt hook and crypttab spell them.
+CMDLINE_OPTIONS = "allow-discards,no-read-workqueue"
+
+
+def _unlock(self: Luks2, key_file: Path | None = None) -> None:
+    debug(f"Unlocking luks2 device (omarchy tuning): {self.luks_dev_path}")
+    if not self.mapper_name:
+        raise ValueError("mapper name missing")
+    if self.is_unlocked():
+        debug(f"{self.mapper_name} is already open; not deriving the key again")
+        return
+    key_file_arg, passphrase = self._get_passphrase_args(key_file)
+    cmd = ["cryptsetup", "open", str(self.luks_dev_path), str(self.mapper_name),
+           *key_file_arg, "--type", "luks2", *OPEN_FLAGS]
+    try:
+        result = run(cmd, input_data=passphrase)
+    except CalledProcessError as err:
+        raise DiskError(f'Could not unlock luks2 device "{self.luks_dev_path}": {err.stdout.decode().rstrip()}')
+    debug(f"cryptsetup open output: {result.stdout.decode().rstrip()}")
+    if not self.is_unlocked():
+        raise DiskError(f"Failed to unlock luks2 device: {self.luks_dev_path}")
+
+
+_original_lock = Luks2.lock
+
+
+def _lock(self: Luks2) -> None:
+    """archinstall opens the new volume three times during an install: to
+    check the format, to create the btrfs subvolumes, and to mount the
+    layout, closing it in between. Each open is a full argon2id derivation.
+    Keeping the mapper open makes the guarded unlocks above no-ops; the
+    reboot at the end of the install closes it like any other mapping."""
+    if os.environ.get("OMARCHY_LUKS_KEEP_OPEN", "1") == "1":
+        debug(f"keeping {self.mapper_name} open for the rest of the install")
+        return
+    _original_lock(self)
+
+
+def apply() -> None:
+    if os.environ.get("OMARCHY_LUKS_TUNING", "1") != "1":
+        return
+    Luks2.unlock = _unlock    # type: ignore[method-assign]
+    Luks2.lock = _lock        # type: ignore[method-assign]
+
+
+def _luks_uuid_of(spec: str) -> str | None:
+    """LUKS header UUID of the device a cryptdevice= spec names
+    (UUID=, PARTUUID=, or a path)."""
+    if "=" in spec:
+        tag, _, value = spec.partition("=")
+        dev = Path("/dev/disk") / f"by-{tag.lower()}" / value
+    else:
+        dev = Path(spec)
+    if not dev.exists():
+        return None
+    try:
+        return run(["blkid", "-s", "UUID", "-o", "value", str(dev)]).stdout.decode().strip() or None
+    except CalledProcessError:
+        return None
+
+
+def with_cmdline_options(cmdline: str) -> str:
+    """Append the dm-crypt options to a cryptdevice=UUID=...:name parameter
+    that has none, and add the sd-encrypt spelling of the same mapping
+    (rd.luks.name= / rd.luks.options=), leaving anything else untouched.
+
+    Limine boots the pre-built UKI with this cmdline (limine-entry-tool
+    writes it into the entry, overriding the UKI's embedded one). That
+    initramfs has the systemd hooks, which ignore cryptdevice= and would wait
+    on root=/dev/mapper/root forever; the rd.luks.* parameters make it
+    unlock the same partition under the same mapper name. A later
+    limine-mkinitcpio rebuild from the busybox drop-ins reads cryptdevice=
+    and ignores rd.luks.*, so one cmdline serves both initramfs flavours."""
+    out = []
+    extra = []
+    for param in cmdline.split():
+        if param.startswith("cryptdevice=") and param.count(":") == 1:
+            param = f"{param}:{CMDLINE_OPTIONS}"
+        if param.startswith("cryptdevice="):
+            spec, _, rest = param[len("cryptdevice="):].partition(":")
+            name = rest.split(":")[0] or "root"
+            uuid = _luks_uuid_of(spec)
+            if uuid:
+                extra += [f"rd.luks.name={uuid}={name}",
+                          f"rd.luks.options={uuid}={CMDLINE_OPTIONS.replace('allow-discards', 'discard')}"]
+        out.append(param)
+    return " ".join(out + extra)

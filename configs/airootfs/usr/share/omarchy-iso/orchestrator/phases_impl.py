@@ -1118,7 +1118,8 @@ def _write_limine_defaults_from_config(ctx: InstallContext, installer, config) -
     if root is None:
         raise RuntimeError(f"Could not detect root at mountpoint {ctx.target}")
 
-    cmdline = " ".join(installer._get_kernel_params(root))
+    from .luks_tuning import with_cmdline_options
+    cmdline = with_cmdline_options(" ".join(installer._get_kernel_params(root)))
     _write_limine_defaults(ctx, cmdline, esp_mount=_installer_esp_mount(installer))
 
 
@@ -1412,7 +1413,7 @@ def _write_pre_mounted_crypttab(ctx: InstallContext) -> None:
     if not luks_uuid:
         return
     crypttab = ctx.target / "etc" / "crypttab.initramfs"
-    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,discard\n")
+    crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,discard,no-read-workqueue\n")
 
 
 def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
@@ -1420,7 +1421,7 @@ def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:
     if storage.get("luks_uuid"):
         root_mapper = storage.get("root_mapper") or "/dev/mapper/omarchy_root"
         return (
-            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root "
+            f"cryptdevice=UUID={storage['luks_uuid']}:omarchy_root:allow-discards,no-read-workqueue "
             f"root={root_mapper} zswap.enabled=0 "
             "rootflags=subvol=@ rw rootfstype=btrfs"
         )
@@ -1887,21 +1888,22 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     # With a pre-built UKI in the image, copy it to the ESP and skip the ~4 s
     # of limine-mkinitcpio. Without one, build it here as before.
     #
-    # Encrypted installs must NOT take the pre-baked path. The build-time bake
-    # runs `mkinitcpio -c /etc/mkinitcpio.conf`, and naming the config
-    # explicitly makes mkinitcpio skip /etc/mkinitcpio.conf.d/*.conf — which is
-    # where omarchy_hooks.conf adds the `encrypt` hook. The baked initramfs
-    # therefore carries no encrypt hook and no dm_crypt module, so
-    # /dev/mapper/root is never created and systemd waits for it forever with
-    # no timeout. limine-mkinitcpio reads the drop-ins, so the install-time
-    # build produces a working initramfs; an encrypted install pays the ~4s.
+    # Encrypted installs take the pre-built path too. build-root-image.sh
+    # builds the UKI with the systemd hook set plus sd-encrypt, and Limine
+    # passes it the install's cmdline from its entry: rd.luks.name= names the
+    # LUKS partition and root=/dev/mapper/root the filesystem, so sd-encrypt
+    # unlocks it at a passphrase prompt. The same cmdline goes to
+    # /etc/default/limine and /etc/kernel/cmdline, where cryptdevice= serves
+    # the busybox initramfs the first kernel update's limine-mkinitcpio builds.
     prebuilt_uki = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.efi"
     # Limine names a UKI after the kernel package it belongs to, and the image
     # records which one it was built with (stock linux on older images).
     prebuilt_kernel_file = ctx.target / "var" / "lib" / "omarchy-iso" / "prebuilt-uki.kernel"
     prebuilt_kernel = prebuilt_kernel_file.read_text().strip() if prebuilt_kernel_file.is_file() else "linux"
     esp_uki = ctx.target / "boot" / "EFI" / "Linux" / f"omarchy_{prebuilt_kernel}.efi"
-    if prebuilt_uki.is_file() and "cryptdevice=" not in cmdline:
+    used_prebuilt_uki = False
+    if prebuilt_uki.is_file():
+        used_prebuilt_uki = True
         with _time_step("LIMINE.deploy_prebuilt_uki (copy from image)"):
             esp_uki.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(prebuilt_uki, esp_uki)
@@ -1919,7 +1921,7 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
                 check=True,
             )
     else:
-        with _time_step("LIMINE.limine-mkinitcpio (fallback — no pre-built UKI, or encrypted)"):
+        with _time_step("LIMINE.limine-mkinitcpio (fallback — no pre-built UKI)"):
             subprocess.run(
                 ["arch-chroot", str(ctx.target), "limine-mkinitcpio"],
                 check=True,
@@ -1932,7 +1934,10 @@ def finalize_limine_boot(ctx: InstallContext) -> None:
     )
     if "Omarchy" not in limine_conf.read_text():
         raise RuntimeError(f"{limine_conf} has no Omarchy entry")
-    if "cryptdevice=" in cmdline and "cryptdevice=" not in limine_conf.read_text():
+    # limine-mkinitcpio wrote the entry itself, so its cmdline is checked
+    # here. A pre-built UKI's entry comes from limine-entry-tool, and
+    # validate_boot checks the cmdline that install ends up with.
+    if "cryptdevice=" in cmdline and not used_prebuilt_uki and "cryptdevice=" not in limine_conf.read_text():
         raise RuntimeError(f"encrypted install but {limine_conf} has no cryptdevice=")
 
 
@@ -2279,12 +2284,14 @@ def validate_boot(ctx: InstallContext) -> None:
     if "Omarchy" not in limine_conf_text:
         raise RuntimeError(f"{limine_conf} has no Omarchy entry")
 
-    if ctx.encrypt and "cryptdevice=" not in limine_conf_text:
-        raise RuntimeError(f"Encrypted install but {limine_conf} has no cryptdevice=")
-
     kernel_cmdline = ctx.target / "etc" / "kernel" / "cmdline"
     if not kernel_cmdline.exists():
         raise RuntimeError(f"{kernel_cmdline} missing — UKI would have no cmdline")
+
+    # cryptdevice= has to reach the next limine-mkinitcpio rebuild: through
+    # the entry in limine.conf, or through /etc/kernel/cmdline.
+    if ctx.encrypt and "cryptdevice=" not in limine_conf_text and "cryptdevice=" not in kernel_cmdline.read_text():
+        raise RuntimeError(f"Encrypted install but neither {limine_conf} nor {kernel_cmdline} has cryptdevice=")
 
     default_limine = ctx.target / "etc" / "default" / "limine"
     config_text = _limine_combined_config_text(ctx, default_limine.read_text())

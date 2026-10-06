@@ -56,6 +56,9 @@ from archinstall.lib.models.device import DiskLayoutType, EncryptionType
 from archinstall.lib.pacman.config import PacmanConfig
 from archinstall.lib.models.users import User
 
+from . import luks_tuning
+luks_tuning.apply()
+
 from .ui import info
 
 
