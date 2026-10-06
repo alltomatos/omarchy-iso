@@ -228,7 +228,7 @@ def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
         for module, function in settle_originals.items():
             module.udev_sync = function
         if settle["seconds"] >= 0.05:
-            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.3f}s")
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.6f}s")
 
 
 def _write_locale_conf_for_prebuilt(installer, locale_config) -> None:

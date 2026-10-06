@@ -37,6 +37,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
 from dataclasses import replace
@@ -163,7 +164,7 @@ def _time_step(label: str):
     finally:
         _elapsed = time.monotonic() - _t0
         if _elapsed >= 0.05:
-            info(f"[step] {label}: {_elapsed:.3f}s")
+            info(f"[step] {label}: {_elapsed:.6f}s")
 
 
 ROOT_IMAGE_STREAM = Path("/run/archiso/bootmnt/arch/x86_64/omarchy-root.btrfs.zst")
@@ -1890,6 +1891,42 @@ def _target_user_env(ctx: InstallContext, user: str) -> list[str]:
     ]
 
 
+# Omarchy's run_logged prints "[<date> <time>] Starting: <script>" as a script
+# begins and "Completed:" (or "Failed:") as it ends.
+_OMARCHY_SCRIPT_LINE = re.compile(rb"^\[[0-9: -]+\] (Starting|Completed|Failed): (\S+)")
+
+
+def _run_timing_scripts(cmd: list[str]) -> None:
+    """Run cmd with its output passed through line by line, and after each
+    Omarchy install script it runs, add a [step] line with its duration in
+    microseconds.
+
+    run_logged stamps its lines in whole seconds (bash printf %T), too coarse
+    for a phase that runs about 50 scripts in 3 s. It prints them unbuffered as
+    each script starts and ends, so the time they arrive here is the script's
+    own. The output goes where it went before, stderr folded into stdout as
+    the dashboard already merges them."""
+    out = sys.stdout.buffer
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    started: dict[bytes, float] = {}
+    for line in proc.stdout:
+        now = time.monotonic()
+        out.write(line)
+        out.flush()
+        match = _OMARCHY_SCRIPT_LINE.match(line)
+        if not match:
+            continue
+        event, script = match.groups()
+        if event == b"Starting":
+            started[script] = now
+        elif script in started:
+            name = script.decode(errors="replace").removeprefix("/usr/share/omarchy/install/")
+            info(f"[step] {name}: {now - started.pop(script):.6f}s")
+    returncode = proc.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
 def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str | None = None,
                               private_mounts: bool = False) -> None:
     _prepare_target_setup(ctx)
@@ -1944,7 +1981,7 @@ def _run_target_setup_command(ctx: InstallContext, cmd: list[str], *, user: str 
     chroot_cmd += [str(ctx.target), "env", "--unset=XDG_RUNTIME_DIR", *env_extras, *cmd]
 
     try:
-        subprocess.run(chroot_cmd, check=True)
+        _run_timing_scripts(chroot_cmd)
     finally:
         if log_bind_mounted:
             subprocess.run(["umount", str(target_log)], check=False, capture_output=True)
