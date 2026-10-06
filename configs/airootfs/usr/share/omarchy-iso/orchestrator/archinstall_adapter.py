@@ -274,6 +274,27 @@ def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bo
                 info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
 
 
+class OmarchyInstaller(Installer):
+    """archinstall's Installer, without its request to report our failures.
+
+    Installer.__exit__ answers any exception inside `with Installer(...)` with
+    "Please submit this issue (and file) to
+    https://github.com/archlinux/archinstall/issues". Most of what runs in that
+    block here is Omarchy's own install (the root image, Limine, efibootmgr),
+    so Omarchy's failures would be filed with archinstall
+    (archlinux/archinstall#4773: an efibootmgr refusal in phases_impl). The
+    phase runner reports a failure itself, with its own log; on the way out
+    this keeps only archinstall's copy of its log to the install medium."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            return super().__exit__(exc_type, exc_value, traceback)
+        sync_log = getattr(self, "sync_log_to_install_medium", None)
+        if sync_log is not None:
+            sync_log()
+        return None
+
+
 @contextmanager
 def open_installer(
     arch_config: ArchConfig,
@@ -284,7 +305,7 @@ def open_installer(
     /mnt is left clean for a retry."""
     if not arch_config.disk_config:
         raise RuntimeError("disk_config missing from arch config")
-    with Installer(
+    with OmarchyInstaller(
         mountpoint,
         arch_config.disk_config,
         kernels=arch_config.kernels,
