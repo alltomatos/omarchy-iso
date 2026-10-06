@@ -142,9 +142,15 @@ static ZSTD_CCtx *pack_cctx(void)
 	return cctx;
 }
 
+/* All zero: the first byte is 0 and every byte equals the next one. */
+static int all_zero(const uint8_t *p, size_t n)
+{
+	return p[0] == 0 && memcmp(p, p + 1, n - 1) == 0;
+}
+
 static int pack(const char *raw, const char *out)
 {
-	size_t size, n, i, tsize, bound = ZSTD_compressBound(FRAME_SIZE);
+	size_t size, n, i, tsize, zeros = 0, packed = 0, bound = ZSTD_compressBound(FRAME_SIZE);
 	const uint8_t *in = map_file(raw, &size, FAILED);
 	ZSTD_CCtx *cctx = pack_cctx();
 	uint8_t *buf = malloc(bound), *table;
@@ -168,6 +174,8 @@ static int pack(const char *raw, const char *out)
 
 		if (ZSTD_isError(c))
 			die(FAILED, "frame %zu: %s", i, ZSTD_getErrorName(c));
+		zeros += all_zero(in + pos, len);
+		packed += c;
 		if (fwrite(buf, 1, c, f) != c)
 			die(FAILED, "%s: %s", out, strerror(errno));
 		put_le32(table + SKIP_HEADER + i * ENTRY, c);
@@ -181,6 +189,8 @@ static int pack(const char *raw, const char *out)
 	put_le32(table + SKIP_HEADER + n * ENTRY + 5, SEEKABLE_MAGIC);
 	if (fwrite(table, 1, tsize, f) != tsize || fclose(f))
 		die(FAILED, "%s: %s", out, strerror(errno));
+	fprintf(stderr, "omarchy-image-write: packed %.2f GiB as %zu frames (%zu zero) into %.2f GiB\n",
+		size / 1073741824.0, n, zeros, (packed + tsize) / 1073741824.0);
 
 	ZSTD_freeCCtx(cctx);
 	free(buf);
@@ -262,12 +272,6 @@ static int is_zero_frame(const struct frame *f)
 {
 	return f->dsize == max_dsize && f->csize == zero_frame_size &&
 	       memcmp(image + f->src, zero_frame, zero_frame_size) == 0;
-}
-
-/* All zero: the first byte is 0 and every byte equals the next one. */
-static int all_zero(const uint8_t *p, size_t n)
-{
-	return p[0] == 0 && memcmp(p, p + 1, n - 1) == 0;
 }
 
 static int pwrite_all(int fd, const uint8_t *p, size_t n, off_t off)
