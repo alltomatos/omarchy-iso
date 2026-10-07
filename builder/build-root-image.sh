@@ -201,6 +201,29 @@ fi
 installed=$(find "$root/var/lib/pacman/local" -mindepth 1 -maxdepth 1 -type d | wc -l)
 echo "Root image holds $installed packages"
 
+# Compile the default locale into the image. archinstall's set_locale
+# uncomments the chosen locale and runs locale-gen on the target, which
+# rebuilds the whole locale archive: 0.77 s for en_US.UTF-8 in a traced
+# install. With the archive already holding it, the orchestrator skips that
+# run (luks_tuning._run_command); any other locale still compiles as before.
+if grep -q '^#en_US.UTF-8 UTF-8' "$root/etc/locale.gen"; then
+  sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' "$root/etc/locale.gen"
+  arch-chroot "$root" locale-gen >/dev/null && echo "en_US.UTF-8 compiled into the image's locale archive"
+fi
+
+# The runtime's install log helper forks `date` twice per script it runs
+# (131 forks in a traced install, about 0.5 s). bash formats the same
+# timestamp itself. Same output, no fork; patched here until the runtime
+# package carries the change.
+logging_sh="$root/usr/share/omarchy/install/helpers/logging.sh"
+if [[ -f $logging_sh ]] && grep -q "date '+%Y-%m-%d %H:%M:%S'" "$logging_sh"; then
+  sed -i \
+    -e 's/\$(date '"'"'+%Y-%m-%d %H:%M:%S'"'"')/$(printf "%(%Y-%m-%d %H:%M:%S)T" -1)/g' \
+    -e 's/\$(date +%s)/$EPOCHSECONDS/g' \
+    "$logging_sh"
+  bash -n "$logging_sh" && echo "logging.sh: timestamps without forking date"
+fi
+
 sync
 
 # Build the UKI here, once, so the installer copies it to the ESP and skips

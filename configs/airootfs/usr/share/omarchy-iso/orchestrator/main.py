@@ -36,8 +36,7 @@ def build_phases(ctx: InstallContext):
         configure_hibernation,
         run_system_finalizer,
         stage_provisioning_state,
-        finalize_limine_boot,
-        run_chroot_finalizer,
+        finalize_boot_and_user,
         configure_dns_resolver,
         configure_login,
         configure_ssh_access,
@@ -55,8 +54,10 @@ def build_phases(ctx: InstallContext):
         # Before finalize_limine_boot: the deferred-provisioning cryptkey drop-in and keyfile
         # must be in place for the final UKI build.
         ("Staging provisioning",          stage_provisioning_state),
-        ("Finalizing Limine boot",     finalize_limine_boot),
-        ("Finalizing user",            run_chroot_finalizer),
+        # Limine (ESP, UKI, boot entry) and the user's own setup (home,
+        # theme, mise) touch disjoint parts of the target and run together;
+        # OMARCHY_SERIAL_FINALIZE=1 runs them one after the other.
+        ("Finalizing boot and user",   finalize_boot_and_user),
         ("Configuring login",          configure_login),
         ("Configuring SSH access",     configure_ssh_access),
         ("Configuring Tailscale",      configure_tailscale),
