@@ -9,6 +9,26 @@
 
 set -euo pipefail
 
+# Stamp the ConditionNeedsUpdate= markers before anything below can exit early.
+# pacstrap leaves /etc newer than the ld.so.cache, the journal catalog and the
+# sysusers stamp it just wrote, so on every live boot systemd re-runs
+# ldconfig.service, systemd-journal-catalog-update.service and
+# systemd-sysusers.service against a read-only squashfs that cannot have
+# changed since it was built. Measured on the live ISO: "Rebuild Dynamic Linker
+# Cache" takes 403 ms, plus the catalog and sysusers runs.
+#
+# The installer does the same for the installed system. systemd-update-done
+# is not in PATH: systemd ships it under /usr/lib/systemd, which is where the
+# installer calls it from in the target too. If it is missing, the systemd
+# layout is unexpected and live boots redo the work: slower, but not a build
+# failure, so warn instead of failing.
+if [[ -x /usr/lib/systemd/systemd-update-done ]]; then
+  /usr/lib/systemd/systemd-update-done
+  echo "Stamped /etc/.updated and /var/.updated; live boots skip ldconfig, the journal catalog and sysusers."
+else
+  echo "WARNING: /usr/lib/systemd/systemd-update-done missing; every live boot will redo the update units" >&2
+fi
+
 mirror=/var/cache/omarchy/mirror/offline
 shipped_list=/usr/share/omarchy-iso/offline-mirror.shipped
 

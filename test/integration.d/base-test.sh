@@ -85,6 +85,11 @@ check() {
   else
     printf 'not ok - %s\n' "$description"
     ((FAILURES += 1))
+    # What was on the screen when it failed. A screen assertion that fails
+    # leaves nothing else to look at: the last capture predates it.
+    local slug=${description,,}
+    slug=${slug//[^a-z0-9]/-}
+    vm_running 2>/dev/null && capture_console "failure-check-${slug:0:60}" || true
   fi
 }
 
