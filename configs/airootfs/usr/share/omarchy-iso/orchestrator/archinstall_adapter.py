@@ -38,6 +38,7 @@ from the start.
 from __future__ import annotations
 
 import importlib
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -89,7 +90,114 @@ def make_mirror_handler(offline: bool = True) -> MirrorListHandler:
     return MirrorListHandler(offline=offline, verbose=False)
 
 
-def perform_filesystem_operations(arch_config: ArchConfig) -> None:
+@contextmanager
+def _filesystem_step_tweaks(throwaway_root_fs: bool) -> Iterator[None]:
+    """Time the pieces of archinstall's filesystem step, and keep mkfs.btrfs
+    from discarding the whole device when the filesystem it makes is thrown
+    away.
+
+    The step is one number in the log (2.0 s in a VM, 4.4 s on an XPS 16,
+    22.2 s on a ThinkPad E14), which cannot say which piece cost what, so
+    every piece logs its own [step] line.
+
+    mkfs.btrfs TRIMs the entire device before it formats (mkfs.btrfs(8), -K
+    to skip). On a virtual disk that is instant; on a 1 TB laptop SSD behind
+    dm-crypt it takes seconds, and much longer on a DRAM-less drive. When a
+    root image is about to be written over that filesystem the TRIM only
+    delays the install: the image lands two seconds later, the installed
+    system keeps fstrim.timer enabled, and btrfs discards freed space on its
+    own. Nothing else about the step changes.
+
+    Everything here is best effort. If archinstall moves one of these names
+    the step runs exactly as before, untimed and with the TRIM."""
+    try:
+        import archinstall.lib.disk.device_handler as dh_module
+        import archinstall.lib.disk.filesystem as fs_module
+        from archinstall.lib.disk.luks import Luks2
+        from archinstall.lib.models.device import FilesystemType
+        from .phases_impl import _time_step
+        device_handler = dh_module.device_handler
+    except Exception as exc:  # pragma: no cover - depends on the archinstall release
+        info(f"› filesystem step runs untimed ({exc})")
+        yield
+        return
+
+    instance_patches: list[str] = []
+    luks_originals: dict[str, object] = {}
+    settle = {"calls": 0, "seconds": 0.0}
+    settle_originals: dict[object, object] = {}
+
+    def timed(original, label):
+        def wrapper(*args, **kwargs):
+            with _time_step(label):
+                return original(*args, **kwargs)
+        return wrapper
+
+    def format_wrapper(original):
+        takes_options = _method_accepts(original, "additional_parted_options")
+
+        def wrapper(fs_type, path, additional_parted_options=None, *args, **kwargs):
+            options = list(additional_parted_options or [])
+            if throwaway_root_fs and takes_options and fs_type == FilesystemType.BTRFS and "-K" not in options:
+                options.append("-K")
+            label = f"FS.mkfs.{getattr(fs_type, 'value', fs_type)}" + (" -K (no whole-device TRIM)" if "-K" in options else "")
+            with _time_step(label):
+                if takes_options:
+                    return original(fs_type, path, options, *args, **kwargs)
+                return original(fs_type, path, *args, **kwargs)
+        return wrapper
+
+    def luks_wrapper(function, label):
+        def wrapper(self, *args, **kwargs):
+            with _time_step(label):
+                return function(self, *args, **kwargs)
+        return wrapper
+
+    def settle_wrapper(original):
+        def wrapper(*args, **kwargs):
+            started = time.monotonic()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                settle["calls"] += 1
+                settle["seconds"] += time.monotonic() - started
+        return wrapper
+
+    try:
+        for name, label in (("partition", "FS.partition"), ("create_btrfs_volumes", "FS.create_btrfs_subvolumes")):
+            original = getattr(device_handler, name, None)
+            if callable(original):
+                setattr(device_handler, name, timed(original, label))  # instance attribute shadows the method
+                instance_patches.append(name)
+        original_format = getattr(device_handler, "format", None)
+        if callable(original_format):
+            device_handler.format = format_wrapper(original_format)
+            instance_patches.append("format")
+        for name, label in (("encrypt", "FS.luksFormat"), ("unlock", "FS.luks_open")):
+            function = Luks2.__dict__.get(name)
+            if callable(function):
+                luks_originals[name] = function
+                setattr(Luks2, name, luks_wrapper(function, label))
+        for module in (dh_module, fs_module):
+            if callable(getattr(module, "udev_sync", None)):
+                settle_originals[module] = module.udev_sync
+                module.udev_sync = settle_wrapper(module.udev_sync)
+        yield
+    finally:
+        for name in instance_patches:
+            try:
+                delattr(device_handler, name)
+            except AttributeError:
+                pass
+        for name, function in luks_originals.items():
+            setattr(Luks2, name, function)
+        for module, function in settle_originals.items():
+            module.udev_sync = function
+        if settle["seconds"] >= 0.05:
+            info(f"[step] FS.udevadm settle ({settle['calls']} calls): {settle['seconds']:.3f}s")
+
+
+def perform_filesystem_operations(arch_config: ArchConfig, throwaway_root_fs: bool = False) -> None:
     """Partition, format, encrypt. archinstall's FilesystemHandler is its own
     object (separate from Installer) so we run it before opening the
     Installer context manager.
@@ -119,15 +227,16 @@ def perform_filesystem_operations(arch_config: ArchConfig) -> None:
     )
 
     attempts = 3
-    for attempt in range(1, attempts + 1):
-        udev_sync()
-        try:
-            handler.perform_filesystem_operations(**fs_kwargs)
-            return
-        except Exception as exc:
-            if attempt == attempts or "unable to inform the kernel" not in str(exc):
-                raise
-            info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
+    with _filesystem_step_tweaks(throwaway_root_fs):
+        for attempt in range(1, attempts + 1):
+            udev_sync()
+            try:
+                handler.perform_filesystem_operations(**fs_kwargs)
+                return
+            except Exception as exc:
+                if attempt == attempts or "unable to inform the kernel" not in str(exc):
+                    raise
+                info(f"› partition commit lost a udev race (attempt {attempt}/{attempts}); retrying")
 
 
 @contextmanager

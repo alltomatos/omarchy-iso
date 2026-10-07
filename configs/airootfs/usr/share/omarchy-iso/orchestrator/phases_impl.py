@@ -138,6 +138,21 @@ def _omarchy_nvim_package() -> str:
 # the install log (/var/log/omarchy-install.log).
 from contextlib import contextmanager as _contextmanager
 
+def _check_dd_full_blocks(dd_stderr: str) -> None:
+    """dd reports "N+M records out": N full blocks, M partial ones. More than
+    one partial block means dd wrote pipe-sized pieces without O_DIRECT (see
+    the image write), which costs a real disk a minute and a half and is
+    invisible in a VM, so say so in the install log."""
+    match = re.search(r"(\d+)\+(\d+) records out", dd_stderr or "")
+    if not match:
+        return
+    full, partial = int(match.group(1)), int(match.group(2))
+    info(f"› image write: {full} full blocks, {partial} partial")
+    if partial > 1:
+        info(f"› WARNING: dd wrote {partial} partial blocks; the image write "
+             "was buffered, not direct (iflag=fullblock missing?)")
+
+
 @_contextmanager
 def _time_step(label: str):
     _t0 = time.monotonic()
@@ -390,7 +405,12 @@ def arch_install_system(ctx: InstallContext) -> None:
     if not pre_mounted:
         info("› partitioning + formatting + encrypting")
         with _time_step("STEP.perform_filesystem_operations"):
-            arch.perform_filesystem_operations(config)
+            # The btrfs archinstall makes here is overwritten by the root
+            # image a moment later, so it need not TRIM the device first.
+            arch.perform_filesystem_operations(
+                config,
+                throwaway_root_fs=ROOT_IMAGE_RAW_ZST.is_file() or ROOT_IMAGE_RAW.is_file(),
+            )
 
     info("› opening installer context")
     with arch.open_installer(config, ctx.target, silent=True) as installer:
@@ -601,11 +621,24 @@ def _install_root_image_dd(ctx: InstallContext) -> None:
         with _time_step("F1.dd (zstdcat | dd oflag=direct)"):
             # dd blocks on its writes, so the pipe paces zstd to the disk,
             # and the decoding runs on another core.
-            subprocess.run(
-                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=64M "
-                f"conv=sparse,fsync oflag=direct status=none",
-                shell=True, check=True,
+            #
+            # iflag=fullblock is what makes oflag=direct true. A read from a
+            # pipe returns at most one pipe buffer (64 KiB), dd treats that
+            # as a partial block, and for a partial block it silently drops
+            # O_DIRECT, so without fullblock every write is buffered. On a
+            # LUKS mapper with 512-byte sectors the block device's writeback
+            # then goes out 512 bytes at a time: 2 million NVMe requests per
+            # GiB, 87 s for this image on a 980 PRO against 2.7 s
+            # with full blocks. QEMU hides it (4.9 s there), real disks do
+            # not. bs: 1M-4M measure the same within noise, 2M best, 16M and
+            # 64M slower (on the same drive, stream in RAM).
+            # status=noxfer keeps dd's record counts for the check below.
+            proc = subprocess.run(
+                f"zstdcat {ROOT_IMAGE_RAW_ZST} | dd of={device} bs=2M "
+                f"iflag=fullblock conv=sparse,fsync oflag=direct status=noxfer",
+                shell=True, check=True, stderr=subprocess.PIPE, text=True,
             )
+            _check_dd_full_blocks(proc.stderr)
     else:
         with _time_step("F1.dd (oflag=direct)"):
             subprocess.run(
@@ -1174,6 +1207,19 @@ def _write_limine_defaults(
     # pre-mounted alike), so this is where the console parameter goes.
     if CONSOLE_NO_ANSI_QUERY not in cmdline.split():
         cmdline = f"{cmdline} {CONSOLE_NO_ANSI_QUERY}"
+    # And the sd-encrypt spelling of cryptdevice=. Added on the
+    # archinstall-derived path only, it would leave an encrypted install into
+    # free space (the pre-mounted path) with an entry the pre-built UKI cannot
+    # unlock: no rd.luks.name=, no cryptsetup job, no passphrase prompt, and
+    # "A start job is running for /dev/mapper/omarchy_root" with no limit.
+    # No VM scenario installs into free space.
+    from .luks_tuning import with_cmdline_options
+    cmdline = with_cmdline_options(cmdline)
+    if "cryptdevice=" in cmdline and "rd.luks.name=" not in cmdline:
+        raise RuntimeError(
+            f"encrypted cmdline has cryptdevice= but no rd.luks.name=; the "
+            f"pre-built UKI could not unlock the root: {cmdline!r}"
+        )
 
     default_text = _limine_template(ctx, "default.conf").read_text()
     default_text = default_text.replace("@@CMDLINE@@", cmdline)
@@ -2517,9 +2563,38 @@ def _validate_pre_mounted_filesystems(ctx: InstallContext) -> None:
 # true factory reset.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _mark_updates_applied(ctx: InstallContext) -> None:
+    """Disarm ConditionNeedsUpdate= for the first boot.
+
+    Arch's 35-systemd-update pacman hook touches /usr after every
+    transaction, which arms ldconfig.service, systemd-hwdb-update,
+    systemd-journal-catalog-update and systemd-sysusers for the next boot.
+    pacman has already done all four at transaction time (it runs ldconfig
+    itself, and the 20-/25-systemd-* hooks run sysusers, hwdb and the
+    catalog), so on the first boot they only repeat the work: on a
+    hardware install "Rebuild Dynamic Linker Cache" alone was 1.32 s of a
+    4.54 s userspace. systemd-update-done records /usr's timestamp in
+    /etc/.updated and /var/.updated, which is exactly what those units'
+    condition compares against. It has to run after the last transaction
+    (the per-machine packages re-arm it) and before the factory snapshot,
+    so a factory reset boots as fast as the install did."""
+    done = ctx.target / "usr" / "lib" / "systemd" / "systemd-update-done"
+    if not done.is_file():
+        return
+    with _time_step("FINAL.systemd-update-done (disarm first-boot update units)"):
+        result = subprocess.run(
+            ["arch-chroot", str(ctx.target), "/usr/lib/systemd/systemd-update-done"],
+            check=False, capture_output=True, text=True,
+        )
+    if result.returncode != 0:
+        # Cosmetic for the install: the first boot just runs the units.
+        info(f"› systemd-update-done failed ({result.returncode}); first boot will run the update units")
+
+
 def create_factory_snapshot(ctx: InstallContext) -> None:
     # The keyring unit writes into @; the snapshot must not catch it midway.
     _join_target_keyring_init(ctx)
+    _mark_updates_applied(ctx)
 
     fstype = _findmnt_value(ctx.target, "FSTYPE")
     if fstype != "btrfs":
