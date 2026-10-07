@@ -91,8 +91,20 @@ check() {
 finish() {
   if ((FAILURES == 0)); then
     log "$SCENARIO passed. Artifacts: $RUN_DIR"
+    # The disk overlays a passed scenario booted are reproducible from the
+    # base image and are the bulk of what a run leaves behind (a hibernate
+    # overlay carries the memory image); on a ramdisk run directory they
+    # are what fills it. Screenshots and logs stay.
+    [[ ${OMARCHY_INTEGRATION_KEEP_DISKS:-0} == 1 ]] || rm -f "$RUN_DIR"/*.qcow2
   else
     log "$SCENARIO FAILED: $FAILURES assertion(s). Artifacts: $RUN_DIR"
+    # A failed scenario keeps its disks for a look afterwards. A CI host
+    # never takes that look (it uploads logs and screenshots, not disks)
+    # and a scenario whose failures are known and allowed, such as
+    # factory-reset's shared-ESP ones, would otherwise park a full
+    # re-install's overlay on the run directory for every scenario after
+    # it: with corrupt-image's ISO copy that fills an 18 GB tmpfs.
+    [[ ${OMARCHY_INTEGRATION_DISCARD_DISKS:-0} == 1 ]] && rm -f "$RUN_DIR"/*.qcow2
     exit 1
   fi
 }
@@ -712,8 +724,17 @@ wait_for_unattended_install() {
 
     if grep -qi "installation stopped" <<<"$text"; then
       capture_console "failure-$prefix-stopped"
+      # The unattended path does not authorize root SSH on the live ISO, so
+      # without this the log copies below come back empty. The installer has
+      # exited to a shell on tty1; tty3 is free for the console login.
+      ssh_live_root true 2>/dev/null || bootstrap_live_root_ssh 2>/dev/null || true
       ssh_live_root "cat /var/log/omarchy-install.log" >"$RUN_DIR/omarchy-install.log" 2>/dev/null || true
       ssh_live_root "cat /run/omarchy-install/state.json" >"$RUN_DIR/state.json" 2>/dev/null || true
+      # What the kernel saw: an I/O error in the installer is only explainable
+      # with the block and filesystem messages behind it.
+      ssh_live_root "dmesg" >"$RUN_DIR/dmesg.txt" 2>/dev/null || true
+      ssh_live_root "journalctl -b --no-pager -o short-precise | tail -n 400" >"$RUN_DIR/journal-tail.txt" 2>/dev/null || true
+      ssh_live_root "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS; df -h /mnt /mnt/boot 2>/dev/null; btrfs device stats /mnt 2>/dev/null" >"$RUN_DIR/target-state.txt" 2>/dev/null || true
       echo "Install failed — artifacts saved to $RUN_DIR" >&2
       return 1
     fi
@@ -773,9 +794,10 @@ install_phase() {
 
   # Keep the installer's own clock, its log and the first boot's numbers next
   # to the base image while the system is reachable, so CI can report them
-  # without attaching the disk.
+  # without attaching the disk (no nbd or loop device on a container runner).
   ssh_sudo "cat /var/log/omarchy-install-timing.json" >"$BASE_DIR/omarchy-install-timing.json" 2>/dev/null || true
   ssh_sudo "cat /var/log/omarchy-install.log" >"$BASE_DIR/omarchy-install.log" 2>/dev/null || true
+  ssh_sudo "cat /etc/kernel/cmdline" >"$BASE_DIR/installed-cmdline.txt" 2>/dev/null || true
   # SSH can answer before startup finishes, and systemd-analyze refuses until
   # it has; wait (bounded) so the first-boot numbers are final.
   ssh_guest "timeout 120 systemctl is-system-running --wait >/dev/null; systemd-analyze" \

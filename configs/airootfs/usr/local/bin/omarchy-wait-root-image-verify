@@ -73,6 +73,7 @@ fi
 reported=false
 progress_drawn=false
 settling=0
+unanswered=0
 # The \r progress line needs terminating before anything else writes to the
 # terminal. Only a verified image gets the cosmetic 100%; a failure (which
 # includes a timed-out, unfinished read) just ends the line.
@@ -83,7 +84,23 @@ finish_progress() {
   printf '\n' >>"$OMARCHY_VERIFY_PROGRESS" 2>/dev/null || true
 }
 while :; do
-  case "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)" in
+  state=$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null)
+  # An empty answer is systemctl failing, not a unit state: PID 1 did not
+  # reply within D-Bus's 25 s (it can stall on the same dying medium while
+  # it stops the hasher) or the call was interrupted. That is transient, so
+  # ask again rather than report a unit that is mid-stop as never started;
+  # give up only after the wait has clearly outlived any stop.
+  if [[ -z $state ]]; then
+    if ((unanswered < 12)); then
+      unanswered=$((unanswered + 1))
+      sleep 5
+      continue
+    fi
+    finish_progress
+    fail "systemd is not answering about $UNIT; cannot verify the root image"
+  fi
+  unanswered=0
+  case "$state" in
     active)
       finish_progress full
       exit 0
@@ -136,8 +153,13 @@ while :; do
       finish_progress
       fail "install medium is too slow: try another USB stick or port"$'\n'"the root image read could not be stopped after its size-based timeout"
       ;;
+    reloading|refreshing|maintenance)
+      sleep 0.5
+      ;;
     *)
-      fail "$UNIT did not run; cannot verify the root image"
+      # inactive after the start above: a condition kept it from running
+      # (the stream or its checksum is not where the unit expects them).
+      fail "$UNIT did not run ($state); cannot verify the root image"
       ;;
   esac
 done

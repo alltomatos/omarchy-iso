@@ -237,8 +237,12 @@ sync
 # time, so the UKI is kept in /var/lib/omarchy-iso, where nothing mounts over
 # it.
 mkdir -p "$root/etc/kernel" "$root/etc/mkinitcpio.d" "$root/var/lib/omarchy-iso"
+# systemd.tty.term.console=dumb: see CONSOLE_NO_ANSI_QUERY in the orchestrator
+# (systemd's console size query hangs 1 boot in 10 with Plymouth on the VT).
+# This embedded cmdline is what boots under Secure Boot, where Limine's entry
+# options are ignored.
 cat >"$root/etc/kernel/cmdline" <<'CMDLINE'
-zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0
+zswap.enabled=0 rootflags=subvol=@ rw rootfstype=btrfs initramfs_async=0 quiet splash loglevel=0 systemd.show_status=false rd.udev.log_level=0 vt.global_cursor_default=0 systemd.tty.term.console=dumb
 CMDLINE
 
 # The preset names the kernel version explicitly: mkinitcpio treats a glob in
@@ -271,11 +275,75 @@ PRESET
   # installs; the first kernel update rebuilds it from the drop-ins as usual.
   # Persistent dm-crypt flags (discards, no read workqueue) come from the LUKS2
   # header, written by the installer at open time, not from the cmdline.
+  # limine-snapper-sync boots read-only snapshots through its busybox
+  # `btrfs-overlayfs` hook (an overlay with a tmpfs upper over the snapshot).
+  # The systemd initramfs has no equivalent, so a snapshot booted with the
+  # pre-built UKI would come up read-only. This is the same
+  # logic as a oneshot in the initrd: after sysroot.mount, before
+  # initrd-root-fs.target, mount an overlay on top of /sysroot when it is a
+  # read-only btrfs snapshot subvolume. Installed as an ordinary mkinitcpio
+  # hook so a systemd-hook rebuild would keep it too.
+  install -d "$root/usr/lib/initcpio/install" "$root/usr/lib/omarchy"
+  cat >"$root/usr/lib/omarchy/snapshot-overlay" <<'SCRIPT'
+#!/bin/bash
+# Mount an overlay over /sysroot when it is a read-only btrfs snapshot, so a
+# snapshot chosen from the boot menu is writable for the session (changes go
+# to a tmpfs and vanish on reboot), as limine-snapper-sync's busybox hook does.
+root=/sysroot
+[[ $(findmnt -no FSTYPE "$root" 2>/dev/null) == btrfs ]] || exit 0
+case $(findmnt -no SOURCE "$root" 2>/dev/null) in */snapshot*) ;; *) exit 0 ;; esac
+[[ $(btrfs property get -t subvol "$root" ro 2>/dev/null) == "ro=true" ]] || exit 0
+echo "[snapshot-overlay] $root is a read-only btrfs snapshot; mounting an overlay"
+ram=/run/omarchy-snapshot-overlay
+mkdir -p "$ram" && mount -t tmpfs cowspace "$ram" && mkdir -p "$ram/upper" "$ram/work" || exit 0
+mount -t overlay overlay -o "lowerdir=$root,upperdir=$ram/upper,workdir=$ram/work" "$root"   && echo "[snapshot-overlay] overlay mounted on $root"
+exit 0
+SCRIPT
+  chmod 0755 "$root/usr/lib/omarchy/snapshot-overlay"
+  cat >"$root/usr/lib/initcpio/install/sd-btrfs-overlayfs" <<'INSTALL'
+#!/usr/bin/env bash
+build() {
+    add_module btrfs
+    add_module overlay
+    add_binary btrfs
+    add_binary findmnt
+    add_binary mount
+    add_binary mkdir
+    add_binary bash
+    # add_systemd_unit also pulls in the unit's ExecStart binary.
+    add_systemd_unit omarchy-snapshot-overlay.service
+    add_symlink /usr/lib/systemd/system/initrd-root-fs.target.wants/omarchy-snapshot-overlay.service \
+        ../omarchy-snapshot-overlay.service
+}
+help() {
+    cat <<HELPEOF
+Systemd-initramfs twin of limine-snapper-sync's btrfs-overlayfs hook: boots a
+read-only btrfs snapshot with a tmpfs overlay so it is writable for the session.
+HELPEOF
+}
+INSTALL
+  chmod 0755 "$root/usr/lib/initcpio/install/sd-btrfs-overlayfs"
+  install -d "$root/usr/lib/systemd/system"
+  cat >"$root/usr/lib/systemd/system/omarchy-snapshot-overlay.service" <<'UNIT'
+[Unit]
+Description=Overlay for a read-only btrfs snapshot root (initrd)
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+After=sysroot.mount
+Before=initrd-root-fs.target initrd-parse-etc.service
+Requires=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/omarchy/snapshot-overlay
+UNIT
+
   cat >"$root/etc/mkinitcpio-prebuilt-uki.conf" <<'CONF'
 MODULES=(thunderbolt)
 BINARIES=()
 FILES=()
-HOOKS=(base systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)
+HOOKS=(base systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck sd-btrfs-overlayfs)
 COMPRESSION="zstd"
 CONF
 

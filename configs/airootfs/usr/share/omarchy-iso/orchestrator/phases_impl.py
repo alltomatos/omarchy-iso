@@ -1170,6 +1170,10 @@ def _write_limine_defaults(
         raise RuntimeError("Could not compute kernel cmdline from install config")
     if "root=" not in cmdline:
         raise RuntimeError(f"Computed cmdline has no root=: {cmdline!r}")
+    # Every variant's cmdline passes through here (archinstall-derived and
+    # pre-mounted alike), so this is where the console parameter goes.
+    if CONSOLE_NO_ANSI_QUERY not in cmdline.split():
+        cmdline = f"{cmdline} {CONSOLE_NO_ANSI_QUERY}"
 
     default_text = _limine_template(ctx, "default.conf").read_text()
     default_text = default_text.replace("@@CMDLINE@@", cmdline)
@@ -1450,6 +1454,20 @@ def _write_pre_mounted_crypttab(ctx: InstallContext) -> None:
         return
     crypttab = ctx.target / "etc" / "crypttab.initramfs"
     crypttab.write_text(f"omarchy_root  UUID={luks_uuid}  none  luks,discard,no-read-workqueue\n")
+
+
+# systemd (257 and later) asks the console for its size with ANSI escape
+# sequences when PID 1 starts, and waits for the reply. With Plymouth holding
+# the VT the reply sometimes never comes and the boot sits at "Starting Switch
+# Root" until a key is pressed: about 1 boot in 10 in QEMU, on the pre-built
+# UKI and on the stock busybox initramfs alike (omacom/omarchy#2931, #2665,
+# discussions/6267; systemd/systemd#35499 is the same symptom, and Arch's
+# systemd 261.2 still shows it after the March/April 2026 fixes). A dumb
+# $TERM for the console makes systemd skip every ANSI query: 0 hangs in 80
+# boots against 3-7 in 40 without it. It changes nothing visible under
+# "quiet splash". Drop it once a systemd release boots clean in a repeated
+# boot test.
+CONSOLE_NO_ANSI_QUERY = "systemd.tty.term.console=dumb"
 
 
 def _build_pre_mounted_cmdline(ctx: InstallContext, btrfs_uuid: str) -> str:

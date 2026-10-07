@@ -20,8 +20,18 @@
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-CORRUPT_ISO="$BASE_DIR/corrupt.iso"
-STREAM=arch/x86_64/omarchy-root.btrfs.zst
+# The 7 GB copy can live somewhere other than the run directory: a CI host
+# that keeps run directories on a tmpfs sized for base images and overlays
+# points OMARCHY_INTEGRATION_SCRATCH_DIR at its disk (the copy is read once
+# at boot and once by the hasher, so a ramdisk buys it nothing).
+CORRUPT_ISO="${OMARCHY_INTEGRATION_SCRATCH_DIR:-$BASE_DIR}/corrupt.iso"
+# The root image's file name is resolved from the ISO, not assumed
+# (omarchy-root.img.zst for the block copy, omarchy-root.btrfs.zst for a
+# btrfs receive stream): with the wrong name the scenario silently tests
+# nothing.
+STREAM=$(xorriso -indev "$ISO" -find /arch/x86_64 -name 'omarchy-root.*.zst' 2>/dev/null |
+  tr -d "'" | sed 's|^/||' | head -n1)
+STREAM=${STREAM:-arch/x86_64/omarchy-root.img.zst}
 VERIFY_UNIT=omarchy-root-image-verify.service
 STATE=/run/omarchy-install/state.json
 
@@ -43,6 +53,7 @@ corrupt_iso() {
   local lba size start off orig flipped
 
   log "Copying the ISO and corrupting one byte inside the root image stream"
+  mkdir -p "$(dirname "$CORRUPT_ISO")"
   rm -f "$CORRUPT_ISO"
   cp --reflink=auto "$ISO" "$CORRUPT_ISO"
 
@@ -151,6 +162,15 @@ assert_refused() {
 
 # ---------------------------------------------------------------------- main
 
+# The ISO copy is a full 7 GB wherever cp cannot reflink (a tmpfs run
+# directory, ext4); it is only needed while this scenario runs. Chain the
+# harness's own exit handler: replacing it would leave the VM running and
+# its SSH port taken for every scenario after this one.
+corrupt_cleanup() {
+  rm -f "$CORRUPT_ISO"
+  cleanup
+}
+trap corrupt_cleanup EXIT
 corrupt_iso
 install_from_corrupt_medium
 assert_refused
