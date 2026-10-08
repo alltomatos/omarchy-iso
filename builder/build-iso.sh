@@ -41,11 +41,14 @@ pacman-key --lsign-key 40DFB630FF42BCFFB047046CF0134EE680CAC571
 pacman --config /configs/pacman-online-${OMARCHY_MIRROR}.conf --noconfirm -Sy omarchy-keyring
 pacman-key --populate omarchy
 
-# Append the [omarchy] repo to the container's /etc/pacman.conf so subsequent
-# tools (notably makepkg in build-omarchy-packages.sh) can resolve omarchy-
-# only build deps like limine-snapper-sync and limine-mkinitcpio-hook.
+# Put OPR first in the container too so makepkg resolves the same overrides
+# as the online installer configuration.
 if ! grep -q '^\[omarchy\]' /etc/pacman.conf; then
-  awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf >> /etc/pacman.conf
+  opr_section=$(awk '/^\[omarchy\]/,/^$/' /configs/pacman-online-${OMARCHY_MIRROR}.conf)
+  awk -v opr="$opr_section" '/^\[core\]/ { print opr; print "" } { print }' \
+    /etc/pacman.conf >/tmp/pacman-opr-first.conf
+  install -m 644 /tmp/pacman-opr-first.conf /etc/pacman.conf
+  rm -f /tmp/pacman-opr-first.conf
 fi
 
 # Build locations
