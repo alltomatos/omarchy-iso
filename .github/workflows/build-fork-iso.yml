@@ -1,0 +1,42 @@
+name: Build ISO (Fork alltomatos)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout omarchy-iso
+        uses: actions/checkout@v4
+
+      - name: Checkout omarchy (fork)
+        uses: actions/checkout@v4
+        with:
+          repository: alltomatos/omarchy
+          ref: quattro
+          path: omarchy
+
+      - name: Checkout omarchy-pkgs (fork)
+        uses: actions/checkout@v4
+        with:
+          repository: alltomatos/omarchy-pkgs
+          ref: quattro
+          path: omarchy-pkgs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+
+      - name: Build ISO with Local Source
+        run: |
+          NO_BOOT_OFFER=1 ./bin/omarchy-iso-make --local-source ./omarchy ./omarchy-pkgs
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-iso-alltomatos
+          path: ./release/*.iso
+          retention-days: 7
